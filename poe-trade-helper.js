@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         PoE Trade Regex Helper
 // @namespace    https://neverconnect.de/
-// @version      0.1.0
-// @updateURL    https://github.com/neverconnect-de/poe-trade-helper/blob/main/poe-trade-helper.js
-// @downloadURL  https://github.com/neverconnect-de/poe-trade-helper/blob/main/poe-trade-helper.js
+// @version      0.3.0
+// @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
+// @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from checked map mods.
 // @author       Codex
 // @match        https://www.pathofexile.com/trade/search/*
