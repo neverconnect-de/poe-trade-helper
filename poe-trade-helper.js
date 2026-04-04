@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Regex Helper
 // @namespace    https://neverconnect.de/
-// @version      0.6.0
+// @version      0.6.1
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from checked map mods.
@@ -1098,13 +1098,16 @@
       return '';
     }
 
-    const selectedNode = row.querySelector([
-      '.multiselect__single',
-      '.multiselect__tags-wrap',
-      '.multiselect__tags',
-      '.multiselect input',
-      'input[type="text"]'
-    ].join(', '));
+    const multiselectInput = row.querySelector('.multiselect input.multiselect__input, .multiselect input[type="text"]');
+    if (multiselectInput) {
+      return normalizeWhitespace(
+        multiselectInput.value
+        || multiselectInput.getAttribute('value')
+        || multiselectInput.getAttribute('placeholder')
+      ).toLowerCase();
+    }
+
+    const selectedNode = row.querySelector('.multiselect__single, .multiselect__tags-wrap, .multiselect__tags');
 
     if (!selectedNode) {
       const body = row.querySelector('.filter-body');
