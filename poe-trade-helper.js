@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Regex Helper
 // @namespace    https://neverconnect.de/
-// @version      0.5.0
+// @version      0.6.0
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from checked map mods.
@@ -1066,15 +1066,7 @@
   }
 
   function extractItemRarityTerms() {
-    const rarityFilter = Array.from(document.querySelectorAll('.filter'))
-      .find((row) => {
-        const title = row.querySelector('.filter-title');
-        return normalizeWhitespace(title && title.textContent).toLowerCase() === 'item rarity';
-      });
-
-    const text = (rarityFilter ? extractFilterSelectionText(rarityFilter) : '')
-      || extractXPathInputValue('/html/body/div[1]/div/div[1]/div[5]/div[4]/div/div[2]/div[2]/div[1]/div[1]/div[2]/div[2]/span/div[2]/div[2]/input')
-      || '';
+    const text = readFilterSelectionValue('Item Rarity') || '';
 
     if (!text || text === 'any') {
       return [];
@@ -1100,12 +1092,13 @@
     return [];
   }
 
-  function extractFilterSelectionText(filterRow) {
-    if (!filterRow) {
+  function readFilterSelectionValue(title) {
+    const row = findFilterRowByTitle(title);
+    if (!row) {
       return '';
     }
 
-    const selectedNode = filterRow.querySelector([
+    const selectedNode = row.querySelector([
       '.multiselect__single',
       '.multiselect__tags-wrap',
       '.multiselect__tags',
@@ -1114,43 +1107,30 @@
     ].join(', '));
 
     if (!selectedNode) {
-      const body = filterRow.querySelector('.filter-body');
+      const body = row.querySelector('.filter-body');
       return normalizeWhitespace(body && body.textContent)
-        .replace(/^item rarity/i, '')
+        .replace(new RegExp(`^${escapeRegex(title)}`, 'i'), '')
         .trim()
         .toLowerCase();
     }
 
-    const text = normalizeWhitespace(
+    return normalizeWhitespace(
       selectedNode.value
       || selectedNode.getAttribute('value')
       || selectedNode.getAttribute('placeholder')
       || selectedNode.textContent
     )
-      .replace(/^item rarity/i, '')
+      .replace(new RegExp(`^${escapeRegex(title)}`, 'i'), '')
       .trim()
       .toLowerCase();
-
-    return text;
   }
 
-  function extractXPathInputValue(xpath) {
-    try {
-      const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-      const node = result && result.singleNodeValue;
-      if (!node) {
-        return '';
-      }
-
-      return normalizeWhitespace(
-        node.value
-        || node.getAttribute('value')
-        || node.getAttribute('placeholder')
-        || node.textContent
-      ).toLowerCase();
-    } catch (_error) {
-      return '';
-    }
+  function findFilterRowByTitle(title) {
+    return Array.from(document.querySelectorAll('.filter'))
+      .find((row) => {
+        const titleNode = row.querySelector('.filter-title');
+        return normalizeWhitespace(titleNode && titleNode.textContent).toLowerCase() === String(title).toLowerCase();
+      }) || null;
   }
 
   function addMapFilterTerm(target, _key, filterValue, minFormatter) {
