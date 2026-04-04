@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Regex Helper
 // @namespace    https://neverconnect.de/
-// @version      0.4.0
+// @version      0.5.0
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from checked map mods.
@@ -20,6 +20,16 @@
   const TOKEN_SOURCE_URL = 'https://raw.githubusercontent.com/veiset/poe-vendor-string/master/src/generated/mapmods/Generated.MapModsV3.ENGLISH.ts';
   const TOKEN_CACHE_KEY = 'tm-poe-trade-not-regex-cache-v1';
   const TOKEN_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const PHYSICAL_REFLECT_TEXT = 'Monsters reflect (13-18)% of Physical Damage';
+  const ELEMENTAL_REFLECT_TEXT = 'Monsters reflect (13-18)% of Elemental Damage';
+  const PHYSICAL_REFLECT_GENERALIZED = 'monsters reflect #% of physical damage';
+  const ELEMENTAL_REFLECT_GENERALIZED = 'monsters reflect #% of elemental damage';
+  const SPECIAL_STATIC_REGEX_BUILDERS = {
+    'map is occupied by #': () => 'occupied',
+    'area is influenced by #': () => 'area.*influenced',
+    'area is influenced by the originator s memories': () => 'originator',
+    'map contains # s citadel': () => 'citadel'
+  };
   const SPECIAL_PSEUDO_REGEX_BUILDERS = {
     'more currency': (min) => `urr.*${buildValueRegex(min)}%`,
     'more scarabs': (min) => `sca.*${buildValueRegex(min)}%`,
@@ -104,22 +114,24 @@
       .${GROUP_TOOL_CLASS} {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 0;
       }
 
       .${GROUP_TOOLBAR_CLASS} {
         display: inline-flex;
         align-items: center;
-        margin-right: 8px;
+        margin-right: 10px;
         flex: 0 0 auto;
       }
 
       .${GROUP_TOOL_CLASS} .tm-group-btn.tm-regex-copy-btn {
-        min-width: 145px;
+        min-width: 0;
+        width: auto;
+        padding: 0 14px;
       }
 
-      .${GROUP_TOOL_CLASS} .tm-group-btn.tm-regex-copy-btn .plus {
-        margin-right: 10px;
+      .controls-right .${GROUP_TOOL_CLASS} .tm-group-btn.tm-regex-copy-btn .plus {
+        margin-right: 8px;
       }
 
     `;
@@ -166,6 +178,10 @@
   }
 
   function extractSelectedModsForGroup(group) {
+    if (!isTradeFilterGroupEnabled(group)) {
+      return [];
+    }
+
     const exactRows = extractSelectedModsFromTradeMarkup(group);
     if (exactRows.length > 0) {
       return exactRows;
@@ -251,6 +267,19 @@
       .filter(Boolean);
   }
 
+  function isTradeFilterGroupEnabled(group) {
+    if (!group || group.classList.contains('disabled')) {
+      return false;
+    }
+
+    const toggle = group.querySelector('.filter-group-header .toggle-btn');
+    if (!toggle) {
+      return true;
+    }
+
+    return !toggle.classList.contains('off');
+  }
+
   function injectGlobalCopyButton() {
     const controlsRight = document.querySelector('.controls .controls-right');
     if (!controlsRight || controlsRight.querySelector(`:scope > .${GROUP_TOOLBAR_CLASS}`)) {
@@ -262,7 +291,7 @@
 
     const tools = document.createElement('div');
     tools.className = GROUP_TOOL_CLASS;
-    tools.innerHTML = `<button type="button" class="btn clear-btn tm-group-btn tm-regex-copy-btn" data-action="copy"><span class="plus"></span><span>Regex</span></button>`;
+    tools.innerHTML = `<button type="button" class="btn clear-btn" data-action="copy"><span class="plus"></span><span>Regex</span></button>`;
     tools.querySelector('[data-action="copy"]').addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -670,6 +699,7 @@
 
         return {
           regex: entry.regex,
+          nm: Boolean(entry.nm),
           candidates,
           candidateMeta: candidates.map((candidate) => ({
             text: candidate,
@@ -682,13 +712,15 @@
 
   function parseTokenEntries(source) {
     const entries = [];
-    const pattern = /\{id:\s*[-\d]+,\s*regex:\s*"((?:\\.|[^"])*)",\s*rawText:\s*"((?:\\.|[^"])*)",\s*generalizedText:\s*"((?:\\.|[^"])*)"/g;
+    const pattern = /\{id:\s*([-\d]+),\s*regex:\s*"((?:\\.|[^"])*)",\s*rawText:\s*"((?:\\.|[^"])*)",\s*generalizedText:\s*"((?:\\.|[^"])*)"(?:,\s*options:\s*\{([^}]*)\})?/g;
     let match;
 
     while ((match = pattern.exec(source)) !== null) {
-      const regexToken = unescapeJs(match[1]);
-      const rawText = unescapeJs(match[2]);
-      const generalizedText = unescapeJs(match[3]);
+      const regexToken = unescapeJs(match[2]);
+      const rawText = unescapeJs(match[3]);
+      const generalizedText = unescapeJs(match[4]);
+      const optionsText = match[5] || '';
+      const nm = /\bnm:\s*true\b/.test(optionsText);
       const candidates = generalizedText
         .split('|')
         .map((part) => part.replace(/^\^/, '').replace(/\$$/, ''))
@@ -700,7 +732,9 @@
 
       if (uniqueCandidates.length > 0) {
         entries.push({
+          id: Number(match[1]),
           regex: regexToken,
+          nm,
           candidates: uniqueCandidates,
           candidateMeta: uniqueCandidates.map((candidate) => ({
             text: candidate,
@@ -726,8 +760,25 @@
     const fallback = [];
     const unmatched = [];
     const fragments = [];
+    const consumedIndexes = new Set();
+    const reflectIndexes = findReflectSelectionIndexes(selectedMods);
 
-    selectedMods.forEach((modEntry) => {
+    if (reflectIndexes.physical !== -1 && reflectIndexes.elemental !== -1) {
+      const comboToken = findReflectComboToken(tokenEntries);
+      if (comboToken) {
+        const modText = `${PHYSICAL_REFLECT_TEXT} + ${ELEMENTAL_REFLECT_TEXT}`;
+        matched.push({ modText, token: comboToken });
+        fragments.push(comboToken.regex);
+        consumedIndexes.add(reflectIndexes.physical);
+        consumedIndexes.add(reflectIndexes.elemental);
+      }
+    }
+
+    selectedMods.forEach((modEntry, index) => {
+      if (consumedIndexes.has(index)) {
+        return;
+      }
+
       const modText = typeof modEntry === 'string' ? modEntry : modEntry && modEntry.text;
       if (!modText) {
         return;
@@ -740,8 +791,17 @@
         return;
       }
 
+      const specialStaticFragment = buildSpecialStaticFragment(modEntry);
+      if (specialStaticFragment) {
+        matched.push({ modText, token: { regex: specialStaticFragment, special: true } });
+        fragments.push(specialStaticFragment);
+        return;
+      }
+
       const generalized = normalizeGeneralizedText(modText);
-      const token = findTokenForMod(generalized, tokenEntries);
+      const token = isReflectGeneralized(generalized)
+        ? findReflectSpecificToken(generalized, tokenEntries)
+        : findTokenForMod(generalized, tokenEntries);
 
       if (token) {
         matched.push({ modText, token });
@@ -785,9 +845,72 @@
     return builder(min);
   }
 
+  function buildSpecialStaticFragment(modEntry) {
+    const modText = typeof modEntry === 'string' ? modEntry : modEntry && modEntry.text;
+    if (!modText) {
+      return '';
+    }
+
+    const normalized = normalizeLooseText(normalizeGeneralizedText(modText));
+    const builder = SPECIAL_STATIC_REGEX_BUILDERS[normalized];
+    return builder ? builder() : '';
+  }
+
   function buildValueRegex(value) {
     const normalizedValue = value == null || `${value}` === '' ? '1' : String(value);
     return generateNumberRegex(normalizedValue, false);
+  }
+
+  function findReflectSelectionIndexes(selectedMods) {
+    let physical = -1;
+    let elemental = -1;
+
+    selectedMods.forEach((modEntry, index) => {
+      const modText = typeof modEntry === 'string' ? modEntry : modEntry && modEntry.text;
+      const generalized = normalizeGeneralizedText(modText);
+      if (generalized === PHYSICAL_REFLECT_GENERALIZED && physical === -1) {
+        physical = index;
+      }
+      if (generalized === ELEMENTAL_REFLECT_GENERALIZED && elemental === -1) {
+        elemental = index;
+      }
+    });
+
+    return { physical, elemental };
+  }
+
+  function isReflectGeneralized(generalized) {
+    return generalized === PHYSICAL_REFLECT_GENERALIZED || generalized === ELEMENTAL_REFLECT_GENERALIZED;
+  }
+
+  function findReflectComboToken(tokenEntries) {
+    return (Array.isArray(tokenEntries) ? tokenEntries : []).find((entry) =>
+      entry
+      && entry.nm
+      && Array.isArray(entry.candidates)
+      && entry.candidates.includes(PHYSICAL_REFLECT_GENERALIZED)
+      && entry.candidates.includes(ELEMENTAL_REFLECT_GENERALIZED)
+    ) || null;
+  }
+
+  function findReflectSpecificToken(generalized, tokenEntries) {
+    const exactMatches = (Array.isArray(tokenEntries) ? tokenEntries : []).filter((entry) =>
+      entry
+      && Array.isArray(entry.candidates)
+      && entry.candidates.includes(generalized)
+    );
+
+    const nonNightmareSingle = exactMatches.find((entry) => !entry.nm && entry.candidates.length === 1);
+    if (nonNightmareSingle) {
+      return nonNightmareSingle;
+    }
+
+    const nonNightmare = exactMatches.find((entry) => !entry.nm);
+    if (nonNightmare) {
+      return nonNightmare;
+    }
+
+    return exactMatches[0] || findTokenForMod(generalized, tokenEntries, { skipReflectSpecialCase: true });
   }
 
   function buildCombinedStatRegex(negativeMods, positiveMods, tokenEntries) {
@@ -817,11 +940,56 @@
     }
 
     const unquoted = trimmed.replace(/^"|"$/g, '');
-    return unquoted
-      .split('|')
+    return splitTopLevelRegexAlternatives(unquoted)
       .map((term) => term.trim())
       .filter(Boolean)
       .map((term) => `"${term}"`);
+  }
+
+  function splitTopLevelRegexAlternatives(value) {
+    const parts = [];
+    let current = '';
+    let escapeNext = false;
+    let parenDepth = 0;
+    let classDepth = 0;
+
+    for (const char of value) {
+      if (escapeNext) {
+        current += char;
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        current += char;
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '[') {
+        classDepth += 1;
+      } else if (char === ']' && classDepth > 0) {
+        classDepth -= 1;
+      } else if (char === '(' && classDepth === 0) {
+        parenDepth += 1;
+      } else if (char === ')' && classDepth === 0 && parenDepth > 0) {
+        parenDepth -= 1;
+      }
+
+      if (char === '|' && classDepth === 0 && parenDepth === 0) {
+        parts.push(current);
+        current = '';
+        continue;
+      }
+
+      current += char;
+    }
+
+    if (current) {
+      parts.push(current);
+    }
+
+    return parts;
   }
 
   function formatRegex(joinedFragments, mode) {
@@ -1086,7 +1254,13 @@
     return Math.floor(n / 10);
   }
 
-  function findTokenForMod(generalized, tokenEntries) {
+  function findTokenForMod(generalized, tokenEntries, options) {
+    const settings = options || {};
+
+    if (!settings.skipReflectSpecialCase && isReflectGeneralized(generalized)) {
+      return findReflectSpecificToken(generalized, tokenEntries);
+    }
+
     const exact = tokenEntries.find((entry) => entry.candidates.includes(generalized));
     if (exact) {
       return exact;
