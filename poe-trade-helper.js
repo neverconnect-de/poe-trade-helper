@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         PoE Trade Regex Helper
+// @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.6.1
+// @version      0.7.0
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
-// @description  Build a poe.re-style regex from checked map mods.
-// @author       Codex
+// @description  Build a poe.re-style regex from trade stat filter.
+// @author       neverconnect
 // @match        https://www.pathofexile.com/trade/search/*
 // @grant        GM_setClipboard
 // ==/UserScript==
@@ -25,10 +25,18 @@
   const PHYSICAL_REFLECT_GENERALIZED = 'monsters reflect #% of physical damage';
   const ELEMENTAL_REFLECT_GENERALIZED = 'monsters reflect #% of elemental damage';
   const SPECIAL_STATIC_REGEX_BUILDERS = {
-    'map is occupied by #': () => 'occupied',
-    'area is influenced by #': () => 'area.*influenced',
+    'map is occupied by': () => 'occupied',
+    'area is influenced by any': () => '(shaper|elder)',
+    'area is influenced by the shaper': () => 'shaper',
+    'area is influenced by the elder': () => 'elder',
     'area is influenced by the originator s memories': () => 'originator',
-    'map contains # s citadel': () => 'citadel'
+    'map contains s citadel': () => 'citadel',
+    'has shaper influence': () => 'shaper',
+    'has elder influence': () => 'elder',
+    'has crusader influence': () => 'crusader',
+    'has redeemer influence': () => 'redeemer',
+    'has hunter influence': () => 'hunter',
+    'has warlord influence': () => 'warlord'
   };
   const SPECIAL_PSEUDO_REGEX_BUILDERS = {
     'more currency': (min) => `urr.*${buildValueRegex(min)}%`,
@@ -230,6 +238,7 @@
       .filter((row) => !row.classList.contains('filter-padded'))
       .filter(isTradeFilterRowEnabled)
       .map(extractTradeFilterRowData)
+      .filter(shouldIncludeRowData)
       .filter(Boolean);
   }
 
@@ -264,6 +273,7 @@
     return enabledIndexes
       .map((index) => rows[index])
       .map((row) => row ? extractTradeFilterRowData(row) : null)
+      .filter(shouldIncludeRowData)
       .filter(Boolean);
   }
 
@@ -336,7 +346,8 @@
     try {
       const tokenEntries = await loadTokenEntries();
       const negativeMods = collectGroupMods('Not');
-      const positiveMods = collectGroupMods('And')
+      const positiveMods = collectTopLevelStatMods()
+        .concat(collectGroupMods('And'))
         .concat(collectGroupMods('Count'))
         .concat(collectActiveSpecialPseudoMods());
       const statPayload = buildCombinedStatRegex(negativeMods, positiveMods, tokenEntries);
@@ -370,6 +381,26 @@
   function collectGroupMods(title) {
     return findTradeFilterGroupsByTitle(title)
       .flatMap((group) => extractSelectedModsForGroup(group));
+  }
+
+  function collectTopLevelStatMods() {
+    const statFiltersGroup = findTradeFilterGroupsByTitle('Stat Filters')[0];
+    if (!statFiltersGroup || !isTradeFilterGroupEnabled(statFiltersGroup)) {
+      return [];
+    }
+
+    const body = statFiltersGroup.querySelector(':scope > .filter-group-body');
+    if (!body) {
+      return [];
+    }
+
+    return Array.from(body.children)
+      .filter((child) => child.classList && child.classList.contains('filter'))
+      .filter((row) => !row.classList.contains('filter-padded'))
+      .filter(isTradeFilterRowEnabled)
+      .map(extractTradeFilterRowData)
+      .filter(shouldIncludeRowData)
+      .filter(Boolean);
   }
 
   function findTradeFilterGroupsByTitle(title) {
@@ -480,7 +511,7 @@
       return true;
     }
 
-    return /[#%+]|resistance|damage|life|mana|energy shield|armour|evasion|ward|block|dexterity|strength|intelligence|critical|speed|charge|curse|regen|leech|projectile|aura|suppres|impale|poison|bleed|ailment|currency|scarabs|divination|pack size|quality \(|maps/i.test(text);
+    return /[#%+]|resistance|damage|life|mana|energy shield|armour|evasion|ward|block|dexterity|strength|intelligence|critical|speed|charge|curse|regen|leech|projectile|aura|suppres|impale|poison|bleed|ailment|currency|scarabs|divination|pack size|quality \(|maps|influence/i.test(text);
   }
 
   function extractRowData(row) {
@@ -509,21 +540,88 @@
     }
 
     const cloned = title.cloneNode(true);
+    const isPseudo = Boolean(cloned.querySelector('.mutate-type-pseudo'));
     cloned.querySelectorAll('.filter-tip, .mutate-type').forEach((node) => node.remove());
 
     const parts = Array.from(cloned.childNodes)
       .map((node) => normalizeWhitespace(node.textContent))
       .filter(Boolean);
 
-    const text = normalizeWhitespace(parts.join(' '));
+    const selectionText = extractRowSelectionValue(row);
+    const text = normalizeWhitespace([parts.join(' '), selectionText].filter(Boolean).join(' '));
     if (!looksLikeStatRow(text)) {
       return null;
     }
 
     return {
       text,
+      isPseudo,
       ...extractRowBounds(row)
     };
+  }
+
+  function shouldIncludeRowData(rowData) {
+    if (!rowData) {
+      return false;
+    }
+
+    if (!rowData.isPseudo) {
+      return true;
+    }
+
+    const normalized = normalizeLooseText(normalizeGeneralizedText(rowData.text));
+    return Boolean(SPECIAL_PSEUDO_REGEX_BUILDERS[normalized] || SPECIAL_STATIC_REGEX_BUILDERS[normalized]);
+  }
+
+  function extractRowSelectionValue(row) {
+    if (!row) {
+      return '';
+    }
+
+    const multiselectValue = extractMultiselectValue(row);
+    if (multiselectValue) {
+      return multiselectValue;
+    }
+
+    const selectedNode = row.querySelector('.multiselect__single, .multiselect__tags-wrap');
+    return normalizeWhitespace(selectedNode && selectedNode.textContent);
+  }
+
+  function extractMultiselectValue(container) {
+    if (!container) {
+      return '';
+    }
+
+    const directSelected = container.querySelector('.multiselect__single');
+    const directSelectedText = normalizeWhitespace(directSelected && directSelected.textContent);
+    if (directSelectedText) {
+      return directSelectedText;
+    }
+
+    const selectedOption = container.querySelector('.multiselect__option--selected');
+    if (selectedOption) {
+      const optionText = normalizeWhitespace(selectedOption.textContent);
+      if (optionText) {
+        return optionText;
+      }
+    }
+
+    const tagsWrap = container.querySelector('.multiselect__tags-wrap, .multiselect__tags');
+    const tagsText = normalizeWhitespace(tagsWrap && tagsWrap.textContent);
+    if (tagsText) {
+      return tagsText;
+    }
+
+    const multiselectInput = container.querySelector('.multiselect input.multiselect__input, .multiselect input[type="text"]');
+    if (!multiselectInput) {
+      return '';
+    }
+
+    return normalizeWhitespace(
+      multiselectInput.value
+      || multiselectInput.getAttribute('value')
+      || multiselectInput.getAttribute('placeholder')
+    );
   }
 
   function extractRowBounds(row) {
@@ -1003,11 +1101,31 @@
     const entries = [];
     const domFilters = extractMapFilterValuesFromDom();
 
-    addMapFilterTerm(entries, 'map_tier', domFilters.map_tier || readMapFilterValueFromState('map_tier'), (min) => `"tier ${generateNumberRegex(String(min), false)}"`);
+    addMapFilterTerm(entries, 'map_tier', domFilters.map_tier || readMapFilterValueFromState('map_tier'), (min) => `"tier ${generateMapTierRegex(min)}"`);
     addMapFilterTerm(entries, 'map_iiq', domFilters.map_iiq || readMapFilterValueFromState('map_iiq'), (min) => `"m q.*${generateNumberRegex(String(min), false)}%"`);
     addMapFilterTerm(entries, 'map_packsize', domFilters.map_packsize || readMapFilterValueFromState('map_packsize'), (min) => `"iz.*${generateNumberRegex(String(min), false)}%"`);
     addMapFilterTerm(entries, 'map_iir', domFilters.map_iir || readMapFilterValueFromState('map_iir'), (min) => `"m rar.*${generateNumberRegex(String(min), false)}%"`);
     return entries;
+  }
+
+  function generateMapTierRegex(value) {
+    const tier = Number.parseInt(String(value), 10);
+    if (!Number.isFinite(tier)) {
+      return String(value || '').trim();
+    }
+
+    const minTier = Math.max(1, Math.min(16, tier));
+    if (minTier >= 16) {
+      return '16';
+    }
+    if (minTier >= 10) {
+      return `1[${minTier - 10}-6]`;
+    }
+    if (minTier === 9) {
+      return '(9|1[0-6])';
+    }
+
+    return `([${minTier}-9]|1[0-6])`;
   }
 
   function extractMapFilterValuesFromDom() {
@@ -1098,13 +1216,9 @@
       return '';
     }
 
-    const multiselectInput = row.querySelector('.multiselect input.multiselect__input, .multiselect input[type="text"]');
-    if (multiselectInput) {
-      return normalizeWhitespace(
-        multiselectInput.value
-        || multiselectInput.getAttribute('value')
-        || multiselectInput.getAttribute('placeholder')
-      ).toLowerCase();
+    const multiselectValue = extractMultiselectValue(row);
+    if (multiselectValue) {
+      return multiselectValue.toLowerCase();
     }
 
     const selectedNode = row.querySelector('.multiselect__single, .multiselect__tags-wrap, .multiselect__tags');
