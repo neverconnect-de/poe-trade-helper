@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.7.0
+// @version      0.8.0
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -16,6 +16,7 @@
   const STYLE_ID = 'tm-poe-trade-not-regex-style';
   const GROUP_TOOL_CLASS = 'tm-poe-trade-group-tools';
   const GROUP_TOOLBAR_CLASS = 'tm-poe-trade-group-toolbar';
+  const RESULT_REGEX_BUTTON_CLASS = 'tm-poe-trade-row-regex-btn';
   const TOAST_ID = 'tm-poe-trade-regex-toast';
   const TOKEN_SOURCE_URL = 'https://raw.githubusercontent.com/veiset/poe-vendor-string/master/src/generated/mapmods/Generated.MapModsV3.ENGLISH.ts';
   const TOKEN_CACHE_KEY = 'tm-poe-trade-not-regex-cache-v1';
@@ -55,6 +56,7 @@
     injectStyles();
     ensureToast();
     injectGlobalCopyButton();
+    injectResultButtons();
     observeDom();
   }
 
@@ -142,6 +144,14 @@
         margin-right: 8px;
       }
 
+      .btns .${RESULT_REGEX_BUTTON_CLASS} {
+        margin-left: 6px;
+        min-width: 0;
+        padding: 0 8px;
+        font-size: 11px;
+        letter-spacing: 0.02em;
+      }
+
     `;
     document.head.appendChild(style);
   }
@@ -166,6 +176,7 @@
     const observer = new MutationObserver(() => {
       ensureToast();
       injectGlobalCopyButton();
+      injectResultButtons();
     });
 
     observer.observe(document.documentElement, {
@@ -312,6 +323,33 @@
     controlsRight.insertBefore(toolbar, controlsRight.firstChild || null);
   }
 
+  function injectResultButtons() {
+    const directButtons = Array.from(document.querySelectorAll('.row .btns .direct-btn'));
+    directButtons.forEach((directButton) => {
+      const buttonGroup = directButton.parentElement;
+      if (!buttonGroup || buttonGroup.querySelector(`.${RESULT_REGEX_BUTTON_CLASS}`)) {
+        return;
+      }
+
+      const regexButton = document.createElement('button');
+      regexButton.type = 'button';
+      regexButton.className = `btn btn-xs btn-default ${RESULT_REGEX_BUTTON_CLASS}`;
+      regexButton.title = 'Copy regex with price and travel to hideout';
+      regexButton.textContent = 'Rx';
+      regexButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handleRowRegexCopyAndHideout(directButton);
+      });
+
+      if (directButton.nextSibling) {
+        buttonGroup.insertBefore(regexButton, directButton.nextSibling);
+      } else {
+        buttonGroup.appendChild(regexButton);
+      }
+    });
+  }
+
   async function handleCopyAllFilters() {
     const result = await generateCombinedRegex();
     if (!result.ok) {
@@ -326,6 +364,33 @@
 
     copyText(result.payload.regex);
     showToast('Combined regex copied', result.payload.regex, buildResultMeta(result.payload), true);
+  }
+
+  async function handleRowRegexCopyAndHideout(directButton) {
+    const row = directButton && directButton.closest('.row');
+    if (!row) {
+      showToast('Copy failed', 'Could not find the selected result row.', '', false);
+      return;
+    }
+
+    const result = await generateCombinedRegex();
+    if (!result.ok || !result.payload || !result.payload.regex) {
+      showToast('Copy failed', result.message || 'No regex generated.', '', false);
+      return;
+    }
+
+    const priceTerm = extractPriceRegexTermFromRow(row);
+    const combinedRegex = [result.payload.regex, priceTerm].filter(Boolean).join(' ');
+
+    copyText(combinedRegex);
+    showToast(
+      'Hideout regex copied',
+      combinedRegex,
+      [buildResultMeta(result.payload), priceTerm ? `Price term: ${priceTerm}` : ''].filter(Boolean).join('\n'),
+      true
+    );
+
+    directButton.click();
   }
 
   function buildResultMeta(result) {
@@ -1266,6 +1331,63 @@
     if (filterValue.max != null && `${filterValue.max}` !== '') {
       target.push(`"${filterValue.max}"`);
     }
+  }
+
+  function extractPriceRegexTermFromRow(row) {
+    if (!row) {
+      return '';
+    }
+
+    const noteNode = row.querySelector('.textCurrency.itemNote');
+    const noteText = normalizeWhitespace(noteNode && noteNode.textContent).toLowerCase();
+    if (noteText) {
+      return buildExactPriceNoteRegex(noteText);
+    }
+
+    const amountNode = row.querySelector('.price [data-field="price"] > span:nth-of-type(2)');
+    const currencyImage = row.querySelector('.price [data-field="price"] .currency-text img');
+    const currencyTextNode = row.querySelector('.price [data-field="price"] .currency-text span');
+    const amount = normalizeWhitespace(amountNode && amountNode.textContent);
+    const currency = normalizeWhitespace(
+      (currencyImage && (currencyImage.getAttribute('alt') || currencyImage.getAttribute('title')))
+      || (currencyTextNode && currencyTextNode.textContent)
+    ).toLowerCase();
+
+    return buildExactVisiblePriceRegex(amount, currency);
+  }
+
+  function buildExactPriceNoteRegex(noteText) {
+    const normalized = normalizeWhitespace(noteText).toLowerCase();
+    if (!normalized) {
+      return '';
+    }
+
+    return `"${escapeRegex(normalized).replace(/\\ /g, '\\s+')}"`;
+  }
+
+  function buildExactVisiblePriceRegex(amount, currency) {
+    const normalizedAmount = normalizeWhitespace(amount);
+    const normalizedCurrency = normalizePriceCurrency(currency);
+    if (!normalizedAmount || !normalizedCurrency) {
+      return '';
+    }
+
+    const amountPart = escapeRegex(normalizedAmount).replace(/\\ /g, '\\s+');
+    const currencyPart = escapeRegex(normalizedCurrency).replace(/\\ /g, '\\s+');
+    return `"${amountPart}\\s*[x×]\\s*${currencyPart}"`;
+  }
+
+  function normalizePriceCurrency(currency) {
+    const normalized = normalizeWhitespace(currency).toLowerCase();
+    if (!normalized) {
+      return '';
+    }
+
+    return normalized
+      .replace(/\borb\b/g, '')
+      .replace(/\bequivalent\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   function generateNumberRegex(number, optimize) {
