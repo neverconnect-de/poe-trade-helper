@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.8.0
+// @version      0.9.0
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -417,12 +417,12 @@
         .concat(collectActiveSpecialPseudoMods());
       const statPayload = buildCombinedStatRegex(negativeMods, positiveMods, tokenEntries);
       const mapTerms = extractActiveMapFilterTerms();
-      const rarityTerms = extractItemRarityTerms();
+      const itemPropertyTerms = extractItemPropertyTerms();
 
       const parts = []
         .concat(statPayload.parts)
         .concat(mapTerms)
-        .concat(rarityTerms);
+        .concat(itemPropertyTerms);
 
       if (parts.length === 0) {
         return { ok: false, message: 'No active or filled filters found.' };
@@ -435,7 +435,7 @@
           matched: statPayload.matched,
           fallback: statPayload.fallback,
           unmatched: statPayload.unmatched,
-          mapTerms: mapTerms.concat(rarityTerms)
+          mapTerms: mapTerms.concat(itemPropertyTerms)
         }
       };
     } catch (error) {
@@ -1248,6 +1248,12 @@
     return mapFilters.filters[key] || null;
   }
 
+  function extractItemPropertyTerms() {
+    return []
+      .concat(extractItemRarityTerms())
+      .concat(extractItemStateTerms());
+  }
+
   function extractItemRarityTerms() {
     const text = readFilterSelectionValue('Item Rarity') || '';
 
@@ -1255,7 +1261,7 @@
       return [];
     }
     if (text.includes('any non-unique') || text.includes('any non unique')) {
-      return ['"y: n"', '"y: m"', '"y: r"'];
+      return ['"y: n|y: m|y: r"'];
     }
     if (text.includes('rare')) {
       return ['"y: r"'];
@@ -1273,6 +1279,44 @@
       return ['"y: u"'];
     }
     return [];
+  }
+
+  function extractItemStateTerms() {
+    return [
+      extractBooleanPropertyTerm('Identified', {
+        yes: '"!unidentified"',
+        no: '"unidentified"'
+      }),
+      extractBooleanPropertyTerm('Mirrored', {
+        yes: '"mirrored"',
+        no: '"!mirrored"'
+      }),
+      extractBooleanPropertyTerm('Corrupted', {
+        yes: '"corrupted"',
+        no: '"!corrupted"'
+      }),
+      extractBooleanPropertyTerm('Split', {
+        yes: '"split"',
+        no: '"!split"'
+      })
+    ].filter(Boolean);
+  }
+
+  function extractBooleanPropertyTerm(title, values) {
+    const text = readFilterSelectionValue(title) || '';
+    if (!text || text === 'any') {
+      return '';
+    }
+
+    if (text === 'yes') {
+      return values.yes || '';
+    }
+
+    if (text === 'no') {
+      return values.no || '';
+    }
+
+    return '';
   }
 
   function readFilterSelectionValue(title) {
