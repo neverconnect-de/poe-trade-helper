@@ -1527,13 +1527,16 @@
       return findReflectSpecificToken(generalized, tokenEntries);
     }
 
-    const exact = tokenEntries.find((entry) => entry.candidates.includes(generalized));
+    const exact = findPreferredTokenMatch(tokenEntries, (candidate) => candidate === generalized);
     if (exact) {
       return exact;
     }
 
     const looseGeneralized = normalizeLooseText(generalized);
-    const loose = tokenEntries.find((entry) => entry.candidates.some((candidate) => normalizeLooseText(candidate) === looseGeneralized));
+    const loose = findPreferredTokenMatch(
+      tokenEntries,
+      (candidate) => normalizeLooseText(candidate) === looseGeneralized
+    );
     if (loose) {
       return loose;
     }
@@ -1545,6 +1548,20 @@
     }
 
     return tokenEntries.find((entry) => entry.candidates.some((candidate) => generalized.includes(candidate) || candidate.includes(generalized))) || null;
+  }
+
+  function findPreferredTokenMatch(tokenEntries, candidateMatches) {
+    const matches = (Array.isArray(tokenEntries) ? tokenEntries : []).filter((entry) =>
+      entry
+      && Array.isArray(entry.candidates)
+      && entry.candidates.some(candidateMatches)
+    );
+
+    return matches.find((entry) => !entry.nm && entry.candidates.length === 1)
+      || matches.find((entry) => !entry.nm)
+      || matches.find((entry) => entry.candidates.length === 1)
+      || matches[0]
+      || null;
   }
 
   function findBestScoredTokenMatch(generalized, looseGeneralized, generalizedWords, tokenEntries) {
