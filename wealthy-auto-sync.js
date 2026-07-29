@@ -2,6 +2,8 @@
 // @name         Wealthy Exile Auto Sync
 // @namespace    https://wealthyexile.com/
 // @version      1.0.0
+// @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/wealthy-auto-sync.js
+// @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/wealthy-auto-sync.js
 // @description  Automatically clicks the "Sync stash" button at a configurable interval.
 // @match        https://wealthyexile.com/*
 // @grant        none
