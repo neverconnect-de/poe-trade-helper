@@ -14,7 +14,7 @@
     "use strict";
 
     // Change this value to your desired interval.
-    const SYNC_INTERVAL_MINUTES = 5;
+    const SYNC_INTERVAL_MINUTES = 15;
 
     const SYNC_BUTTON_SELECTOR = 'button[aria-label="Sync stash"]';
     const TOGGLE_BUTTON_ID = "tampermonkey-auto-sync-toggle";
