@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.8.3
+// @version      0.8.4
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -1592,6 +1592,13 @@
   }
 
   function scoreTokenCandidate(generalized, looseGeneralized, generalizedWords, candidate) {
+    // Fuzzy matching is only for wording changes of the same modifier. Do not
+    // let shared trailing terms (for example "attack and cast speed") map a
+    // Monsters modifier to a Unique Boss modifier with different behaviour.
+    if (generalizedWords[0] && candidate.words[0] && generalizedWords[0] !== candidate.words[0]) {
+      return 0;
+    }
+
     const commonWords = countCommonWords(generalizedWords, candidate.words);
     const maxWords = Math.max(generalizedWords.length, candidate.words.length, 1);
     const minWords = Math.max(Math.min(generalizedWords.length, candidate.words.length), 1);
