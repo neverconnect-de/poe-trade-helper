@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.8.2
+// @version      0.8.3
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -1195,7 +1195,7 @@
 
   function extractMapFilterValuesFromDom() {
     const group = Array.from(document.querySelectorAll('.filter-group'))
-      .find((row) => getTradeFilterGroupTitle(row).toLowerCase() === 'map filters');
+      .find((row) => ['map/chart filters', 'map filters'].includes(getTradeFilterGroupTitle(row).toLowerCase()));
 
     if (!group) {
       return {};
@@ -1203,17 +1203,19 @@
 
     return {
       map_tier: readMapFilterRowValue(group, 'Map Tier'),
-      map_iiq: readMapFilterRowValue(group, 'Map IIQ'),
-      map_packsize: readMapFilterRowValue(group, 'Map Packsize'),
-      map_iir: readMapFilterRowValue(group, 'Map IIR')
+      map_iiq: readMapFilterRowValue(group, ['Increased Item Quantity', 'Map IIQ']),
+      map_packsize: readMapFilterRowValue(group, ['Increased Packsize', 'Map Packsize']),
+      map_iir: readMapFilterRowValue(group, ['Increased Item Rarity', 'Map IIR'])
     };
   }
 
-  function readMapFilterRowValue(group, title) {
+  function readMapFilterRowValue(group, titles) {
+    const normalizedTitles = (Array.isArray(titles) ? titles : [titles])
+      .map((title) => String(title).toLowerCase());
     const row = Array.from(group.querySelectorAll('.filter-group-body .filter'))
       .find((filterRow) => {
         const titleNode = filterRow.querySelector('.filter-title');
-        return normalizeWhitespace(titleNode && titleNode.textContent).toLowerCase() === String(title).toLowerCase();
+        return normalizedTitles.includes(normalizeWhitespace(titleNode && titleNode.textContent).toLowerCase());
       });
 
     if (!row) {
