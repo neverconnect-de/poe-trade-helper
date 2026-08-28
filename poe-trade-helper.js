@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.1
+// @version      0.9.2
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -50,7 +50,16 @@
     'quality pack size': (min) => `ty\\).*${buildValueRegex(min)}%|ze\\).*${buildValueRegex(min)}%`
   };
 
+  const DIRECT_BUTTON_SELECTOR = '.btns .direct-btn';
+  const IN_DEMAND_CONFIRM_PATTERN = /teleport\s+anyway/i;
+  const AUTO_CONFIRM_WINDOW_MS = 8000;
+  const AUTO_CONFIRM_POLL_MS = 40;
+
   let tokenCachePromise = null;
+  let autoConfirmTimer = null;
+  let autoConfirmObserver = null;
+  let autoConfirmClickInFlight = false;
+  const autoConfirmWatchers = new Map();
 
   function init() {
     injectStyles();
@@ -58,6 +67,7 @@
     injectGlobalCopyButton();
     injectResultButtons();
     observeDom();
+    setupInDemandAutoConfirm();
   }
 
   function injectStyles() {
@@ -183,6 +193,147 @@
       childList: true,
       subtree: true
     });
+  }
+
+  // The trade site guards popular listings: clicking "Travel to Hideout" can swap the very
+  // same button into an "In demand. Teleport anyway?" confirmation instead of teleporting.
+  // Arm a short-lived watcher on every hideout button the user clicks, and press the
+  // confirmation for them as soon as it shows up.
+  function setupInDemandAutoConfirm() {
+    document.addEventListener('click', handleDirectButtonClick, true);
+  }
+
+  function handleDirectButtonClick(event) {
+    if (autoConfirmClickInFlight) {
+      return;
+    }
+
+    const target = event.target;
+    if (!target || typeof target.closest !== 'function') {
+      return;
+    }
+
+    const button = target.closest(DIRECT_BUTTON_SELECTOR);
+    if (!button || button.disabled || button.classList.contains('disabled')) {
+      return;
+    }
+
+    const label = normalizeWhitespace(button.textContent);
+    if (IN_DEMAND_CONFIRM_PATTERN.test(label)) {
+      // Already the confirmation step, the user approved it themselves.
+      return;
+    }
+
+    const row = button.closest('.row');
+    autoConfirmWatchers.set(button, {
+      button,
+      row,
+      rowId: row ? row.getAttribute('data-id') : null,
+      initialLabel: label,
+      deadline: Date.now() + AUTO_CONFIRM_WINDOW_MS
+    });
+
+    startAutoConfirmLoop();
+  }
+
+  function startAutoConfirmLoop() {
+    if (!autoConfirmObserver) {
+      autoConfirmObserver = new MutationObserver(pollAutoConfirm);
+    }
+
+    // The button text is swapped in place, so plain childList mutations are not enough.
+    autoConfirmObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'disabled']
+    });
+
+    if (!autoConfirmTimer) {
+      autoConfirmTimer = setInterval(pollAutoConfirm, AUTO_CONFIRM_POLL_MS);
+    }
+  }
+
+  function stopAutoConfirmLoop() {
+    if (autoConfirmTimer) {
+      clearInterval(autoConfirmTimer);
+      autoConfirmTimer = null;
+    }
+
+    if (autoConfirmObserver) {
+      autoConfirmObserver.disconnect();
+    }
+  }
+
+  function pollAutoConfirm() {
+    const now = Date.now();
+
+    autoConfirmWatchers.forEach((entry, key) => {
+      const button = resolveWatchedButton(entry);
+      if (!button || now > entry.deadline) {
+        autoConfirmWatchers.delete(key);
+        return;
+      }
+
+      entry.button = button;
+      if (!isInDemandConfirmButton(button, entry) || button.disabled || button.classList.contains('disabled')) {
+        return;
+      }
+
+      autoConfirmWatchers.delete(key);
+      confirmInDemandTeleport(button);
+    });
+
+    if (autoConfirmWatchers.size === 0) {
+      stopAutoConfirmLoop();
+    }
+  }
+
+  function resolveWatchedButton(entry) {
+    if (entry.button && entry.button.isConnected) {
+      return entry.button;
+    }
+
+    // Vue can re-render the row; fall back to the same listing by id.
+    if (entry.row && entry.row.isConnected) {
+      return entry.row.querySelector(DIRECT_BUTTON_SELECTOR);
+    }
+
+    if (!entry.rowId) {
+      return null;
+    }
+
+    const rowId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(entry.rowId) : entry.rowId.replace(/"/g, '\\"');
+    const row = document.querySelector(`.row[data-id="${rowId}"]`);
+    if (!row) {
+      return null;
+    }
+
+    entry.row = row;
+    return row.querySelector(DIRECT_BUTTON_SELECTOR);
+  }
+
+  function isInDemandConfirmButton(button, entry) {
+    const label = normalizeWhitespace(button.textContent);
+    if (IN_DEMAND_CONFIRM_PATTERN.test(label)) {
+      return true;
+    }
+
+    // Locale independent fallback: the soft failure adds the "expired" class while leaving the
+    // button clickable, whereas a genuinely expired listing is also disabled.
+    return label !== entry.initialLabel && button.classList.contains('expired');
+  }
+
+  function confirmInDemandTeleport(button) {
+    autoConfirmClickInFlight = true;
+    try {
+      button.click();
+    } finally {
+      autoConfirmClickInFlight = false;
+    }
+
+    showToast('Teleport confirmed', '', 'Skipped the "In demand. Teleport anyway?" prompt.', false);
   }
 
   function copyText(value) {
