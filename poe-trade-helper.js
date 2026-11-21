@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.2
+// @version      0.9.3
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -18,8 +18,8 @@
   const GROUP_TOOLBAR_CLASS = 'tm-poe-trade-group-toolbar';
   const RESULT_REGEX_BUTTON_CLASS = 'tm-poe-trade-row-regex-btn';
   const TOAST_ID = 'tm-poe-trade-regex-toast';
-  const TOKEN_SOURCE_URL = 'https://raw.githubusercontent.com/veiset/poe-vendor-string/master/src/generated/mapmods/Generated.MapModsV3.ENGLISH.ts';
-  const TOKEN_CACHE_KEY = 'tm-poe-trade-not-regex-cache-v1';
+  const TOKEN_SOURCE_URL = 'https://raw.githubusercontent.com/veiset/poe-vendor-string/master/poe/public/generated/mapmods/Generated.Map.ENGLISH.min.json';
+  const TOKEN_CACHE_KEY = 'tm-poe-trade-not-regex-cache-v2';
   const TOKEN_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const PHYSICAL_REFLECT_TEXT = 'Monsters reflect (13-18)% of Physical Damage';
   const ELEMENTAL_REFLECT_TEXT = 'Monsters reflect (13-18)% of Elemental Damage';
@@ -1025,37 +1025,82 @@
   }
 
   function parseTokenEntries(source) {
+    const jsonEntries = parseJsonTokenEntries(source);
+    if (jsonEntries) {
+      return jsonEntries;
+    }
+
+    return parseTsTokenEntries(source);
+  }
+
+  function parseJsonTokenEntries(source) {
+    let parsed;
+    try {
+      parsed = JSON.parse(source);
+    } catch (_error) {
+      return null;
+    }
+
+    const tokens = parsed && Array.isArray(parsed.tokens) ? parsed.tokens : null;
+    if (!tokens) {
+      return null;
+    }
+
+    return tokens
+      .filter((token) => token && typeof token.regex === 'string')
+      .map((token) => buildTokenEntry(
+        Number(token.id),
+        token.regex,
+        String(token.rawText || ''),
+        String(token.generalizedText || ''),
+        Boolean(token.options && token.options.nm)
+      ))
+      .filter(Boolean);
+  }
+
+  function buildTokenEntry(id, regexToken, rawText, generalizedText, nm) {
+    const candidates = generalizedText
+      .split('|')
+      .map((part) => part.replace(/^\^/, '').replace(/\$$/, ''))
+      .map(normalizeGeneralizedText)
+      .concat(rawText.split('|').map(normalizeGeneralizedText))
+      .filter(Boolean);
+
+    const uniqueCandidates = Array.from(new Set(candidates));
+    if (uniqueCandidates.length === 0) {
+      return null;
+    }
+
+    return {
+      id,
+      regex: regexToken,
+      nm,
+      candidates: uniqueCandidates,
+      candidateMeta: uniqueCandidates.map((candidate) => ({
+        text: candidate,
+        loose: normalizeLooseText(candidate),
+        words: tokenizeComparableText(candidate)
+      }))
+    };
+  }
+
+  function parseTsTokenEntries(source) {
     const entries = [];
     const pattern = /\{id:\s*([-\d]+),\s*regex:\s*"((?:\\.|[^"])*)",\s*rawText:\s*"((?:\\.|[^"])*)",\s*generalizedText:\s*"((?:\\.|[^"])*)"(?:,\s*options:\s*\{([^}]*)\})?/g;
     let match;
 
     while ((match = pattern.exec(source)) !== null) {
-      const regexToken = unescapeJs(match[2]);
-      const rawText = unescapeJs(match[3]);
-      const generalizedText = unescapeJs(match[4]);
       const optionsText = match[5] || '';
-      const nm = /\bnm:\s*true\b/.test(optionsText);
-      const candidates = generalizedText
-        .split('|')
-        .map((part) => part.replace(/^\^/, '').replace(/\$$/, ''))
-        .map(normalizeGeneralizedText)
-        .concat(rawText.split('|').map(normalizeGeneralizedText))
-        .filter(Boolean);
+      const entry = buildTokenEntry(
+        Number(match[1]),
+        unescapeJs(match[2]),
+        unescapeJs(match[3]),
+        unescapeJs(match[4]),
+        /\bnm:\s*true\b/.test(optionsText)
+      );
 
-      const uniqueCandidates = Array.from(new Set(candidates));
-
-      if (uniqueCandidates.length > 0) {
-        entries.push({
-          id: Number(match[1]),
-          regex: regexToken,
-          nm,
-          candidates: uniqueCandidates,
-          candidateMeta: uniqueCandidates.map((candidate) => ({
-            text: candidate,
-            loose: normalizeLooseText(candidate),
-            words: tokenizeComparableText(candidate)
-          }))
-        });
+      if (entry) {
+        entries.push(entry);
       }
     }
 
