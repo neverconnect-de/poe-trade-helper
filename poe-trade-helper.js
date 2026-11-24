@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.7
+// @version      0.9.8
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -68,6 +68,10 @@
   const sellerSettings = readSellerSettings();
   let sellerCount = { sellers: new Map(), rows: 0, matched: null, signature: '' };
   let sellerRecountQueued = false;
+  const SELLER_AUTO_LOAD_MAX = 100;
+  const SELLER_AUTO_LOAD_PACE_MS = 1200;
+  const SELLER_AUTO_LOAD_TIMEOUT_MS = 8000;
+  let autoLoadState = { running: false, doneKey: null, message: '' };
 
   function init() {
     injectStyles();
@@ -2037,7 +2041,7 @@
   // rows the page has loaded: no request of its own, and scrolling (the page loading more
   // rows) extends the count. With "Collapse listings by account" on, every seller has one row.
   function readSellerSettings() {
-    const defaults = { open: false, minListings: 2 };
+    const defaults = { open: false, minListings: 2, autoLoad: false, autoLoadTarget: 100 };
     try {
       return { ...defaults, ...JSON.parse(localStorage.getItem(SELLER_SETTINGS_KEY) || '{}') };
     } catch (_error) {
@@ -2069,7 +2073,69 @@
         renderSellerPanel();
       }
       renderSellerBadges();
+      maybeAutoLoad();
     });
+  }
+
+  // Auto-load: presses the page's own "Load More" (10 rows per press, one fetch by the page)
+  // until the target is loaded, once per search. A search is told apart by its URL and first
+  // row, so running the same search again loads again.
+  function autoLoadTarget() {
+    return Math.min(SELLER_AUTO_LOAD_MAX, Math.max(10, Math.floor(Number(sellerSettings.autoLoadTarget)) || SELLER_AUTO_LOAD_MAX));
+  }
+
+  function currentSearchKey() {
+    const first = document.querySelector('.resultset .row[data-id]');
+    return first ? `${location.pathname}|${first.getAttribute('data-id')}` : null;
+  }
+
+  function maybeAutoLoad() {
+    if (!sellerSettings.autoLoad || autoLoadState.running) {
+      return;
+    }
+    const key = currentSearchKey();
+    if (!key || key === autoLoadState.doneKey) {
+      return;
+    }
+    autoLoadSearch(key);
+  }
+
+  async function autoLoadSearch(key) {
+    autoLoadState = { running: true, doneKey: null, message: '' };
+    renderSellerPanel();
+    const rowCount = () => document.querySelectorAll('.resultset .row[data-id]').length;
+    let message = '';
+
+    while (sellerSettings.autoLoad && currentSearchKey() === key) {
+      const target = autoLoadTarget();
+      const before = rowCount();
+      if (before >= target) {
+        break;
+      }
+
+      const button = document.querySelector('.resultset .load-more-btn');
+      if (!button || button.disabled || button.classList.contains('disabled')) {
+        break;
+      }
+
+      button.click();
+      const startedAt = Date.now();
+      while (rowCount() <= before && Date.now() - startedAt < SELLER_AUTO_LOAD_TIMEOUT_MS && currentSearchKey() === key) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (rowCount() <= before) {
+        if (currentSearchKey() === key) {
+          message = `Auto-load stopped at ${before} listings: the page loaded no more rows (rate limit?).`;
+        }
+        break;
+      }
+
+      // The page's own fetch limit is 6 per 4 s per account; one press per 1.2 s stays well inside.
+      await new Promise((resolve) => setTimeout(resolve, SELLER_AUTO_LOAD_PACE_MS));
+    }
+
+    autoLoadState = { running: false, doneKey: key, message };
+    renderSellerPanel();
   }
 
   function countSellersOnPage() {
@@ -2160,6 +2226,7 @@
       <div class="tm-body">
         <div class="tm-title">Sellers with the most listings</div>
         <label>Show sellers with at least <input type="number" class="tm-min" min="1" step="1"> listings</label>
+        <label><input type="checkbox" class="tm-auto-load"> Auto-load up to <input type="number" class="tm-auto-target" min="10" max="${SELLER_AUTO_LOAD_MAX}" step="10"> listings after a search</label>
         <div class="tm-panel-status"></div>
         <div class="tm-seller-list"></div>
       </div>
@@ -2174,6 +2241,18 @@
       saveSellerSettings({ minListings: Math.max(1, Math.floor(Number(event.target.value)) || 1) });
       renderSellerPanel();
       renderSellerBadges();
+    });
+    panel.querySelector('.tm-auto-load').addEventListener('change', (event) => {
+      saveSellerSettings({ autoLoad: event.target.checked });
+      autoLoadState.doneKey = null;
+      maybeAutoLoad();
+      renderSellerPanel();
+    });
+    panel.querySelector('.tm-auto-target').addEventListener('change', (event) => {
+      saveSellerSettings({ autoLoadTarget: Math.min(SELLER_AUTO_LOAD_MAX, Math.max(10, Math.floor(Number(event.target.value)) || SELLER_AUTO_LOAD_MAX)) });
+      autoLoadState.doneKey = null;
+      maybeAutoLoad();
+      renderSellerPanel();
     });
 
     renderSellerPanel();
@@ -2192,11 +2271,25 @@
       minInput.value = String(sellerSettings.minListings);
     }
     panel.querySelector('.tm-handle-count').textContent = sellers.length ? String(sellers.length) : '';
+    panel.querySelector('.tm-auto-load').checked = Boolean(sellerSettings.autoLoad);
+    const targetInput = panel.querySelector('.tm-auto-target');
+    if (document.activeElement !== targetInput) {
+      targetInput.value = String(autoLoadTarget());
+    }
 
     const { rows, matched } = sellerCount;
-    panel.querySelector('.tm-panel-status').textContent = rows
-      ? `Counted the ${rows} listings loaded on the page${matched ? ` (${matched} matched)` : ''}. Scroll down to load and count more.`
-      : 'Run a search to count its sellers.';
+    let text = 'Run a search to count its sellers.';
+    if (rows) {
+      text = `Counted the ${rows} listings loaded on the page${matched ? ` (${matched} matched)` : ''}.`;
+      if (autoLoadState.running) {
+        text += ` Loading more… (target ${autoLoadTarget()})`;
+      } else if (autoLoadState.message) {
+        text += ` ${autoLoadState.message}`;
+      } else if (!sellerSettings.autoLoad) {
+        text += ' Scroll down or "Load More" to count more.';
+      }
+    }
+    panel.querySelector('.tm-panel-status').textContent = text;
 
     const list = panel.querySelector('.tm-seller-list');
     list.textContent = '';
