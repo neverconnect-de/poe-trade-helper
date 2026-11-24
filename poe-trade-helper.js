@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.6
+// @version      0.9.7
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -61,19 +61,13 @@
   let autoConfirmClickInFlight = false;
   const autoConfirmWatchers = new Map();
 
-  // Seller ranking: the trade API hands out at most 100 ids per search, so the counts cover
-  // the first 100 listings in the search's sort order (cheapest first by default).
+  // Seller ranking: counted from the result rows the page has loaded (see watchSellerCounts).
   const SELLER_BADGE_CLASS = 'tm-poe-trade-seller-count';
-  const SELLER_STATUS_CLASS = 'tm-poe-trade-seller-status';
   const SELLER_PANEL_ID = 'tm-poe-trade-seller-panel';
-  const SELLER_SETTINGS_KEY = 'tm-poe-trade-seller-settings-v2';
-  const SELLER_LISTING_CHOICES = [30, 50, 100];
-  const SELLER_FETCH_BATCH = 10;
-  const SELLER_SCAN_REUSE_MS = 5 * 60 * 1000;
+  const SELLER_SETTINGS_KEY = 'tm-poe-trade-seller-settings-v3';
   const sellerSettings = readSellerSettings();
-  const sellerScans = new Map();
-  let sellerScanPath = null;
-  let sellerScan = null;
+  let sellerCount = { sellers: new Map(), rows: 0, matched: null, signature: '' };
+  let sellerRecountQueued = false;
 
   function init() {
     injectStyles();
@@ -191,15 +185,6 @@
         cursor: help;
       }
 
-      .${SELLER_STATUS_CLASS} {
-        margin-left: 12px;
-        color: #b9ab87;
-        font-size: 12px;
-      }
-
-      .${SELLER_STATUS_CLASS}.tm-error {
-        color: #e0806a;
-      }
 
       #${SELLER_PANEL_ID} {
         position: fixed;
@@ -273,10 +258,6 @@
       #${SELLER_PANEL_ID} .tm-panel-status {
         margin: 8px 0;
         color: #b9ab87;
-      }
-
-      #${SELLER_PANEL_ID} .tm-panel-status.tm-error {
-        color: #e0806a;
       }
 
       #${SELLER_PANEL_ID} .tm-seller {
@@ -2050,13 +2031,13 @@
   }
 
   // Seller ranking, for buying many items in few trades. A side tab opens a panel that lists
-  // the sellers of the current search with the most listings first; "Travel" teleports
-  // straight to that seller's hideout. Rows also get a "×N" badge. The counts
-  // come from a second search without "Collapse listings by account", which would hide
-  // exactly the extra listings. Counting costs 1 search and 1 fetch per 10 listings, so it
-  // runs when asked ("Count sellers") unless automatic counting is switched on.
+  // the sellers of the listings on the page with the most listings first; "Travel" presses the
+  // site's own "Travel to Hideout" button on that seller's cheapest row, so the existing
+  // in-demand auto-confirm applies. Rows also get a "×N" badge. Everything is read from the
+  // rows the page has loaded: no request of its own, and scrolling (the page loading more
+  // rows) extends the count. With "Collapse listings by account" on, every seller has one row.
   function readSellerSettings() {
-    const defaults = { autoCount: false, open: false, minListings: 2, listings: 50 };
+    const defaults = { open: false, minListings: 2 };
     try {
       return { ...defaults, ...JSON.parse(localStorage.getItem(SELLER_SETTINGS_KEY) || '{}') };
     } catch (_error) {
@@ -2073,175 +2054,79 @@
     }
   }
 
+  // Called on every DOM mutation: coalesced to one recount per frame.
   function watchSellerCounts() {
-    ensureSellerPanel();
-    const path = location.pathname;
-    if (path !== sellerScanPath) {
-      sellerScanPath = path;
-      const reusable = sellerScans.get(path);
-      setCurrentSellerScan(reusable && !reusable.error && Date.now() - reusable.startedAt < SELLER_SCAN_REUSE_MS ? reusable : null);
-      if (sellerSettings.autoCount && !sellerScan) {
-        startSellerScan(path, true);
-      }
-    }
-    renderSellerCounts();
-  }
-
-  async function startSellerScan(path, automatic) {
-    if (sellerScan && sellerScan.path === path && !sellerScan.done) {
+    if (sellerRecountQueued) {
       return;
     }
-
-    const target = parseTradeSearchPath(path);
-    if (!target) {
-      return;
-    }
-
-    const scan = {
-      path,
-      target,
-      query: null,
-      sort: null,
-      startedAt: Date.now(),
-      automatic,
-      limit: SELLER_LISTING_CHOICES.includes(Number(sellerSettings.listings)) ? Number(sellerSettings.listings) : 50,
-      status: '',
-      done: false,
-      error: false,
-      sellers: null,
-      scanned: 0,
-      total: 0
-    };
-
-    let body = null;
-    try {
-      body = await decodeTradeSearchId(target.id);
-    } catch (error) {
-      body = null;
-    }
-    if (!body) {
-      Object.assign(scan, { status: 'This search URL carries no readable query, so sellers cannot be counted.', done: true, error: true });
-      setCurrentSellerScan(scan);
-      return;
-    }
-
-    scan.query = JSON.parse(JSON.stringify(body.query || body));
-    scan.sort = body.sort || { price: 'asc' };
-    const tradeFilters = scan.query.filters && scan.query.filters.trade_filters && scan.query.filters.trade_filters.filters;
-    if (tradeFilters && tradeFilters.account) {
-      // A single seller's listings (opened from the panel): keep the ranking it came from.
-      return;
-    }
-    if (tradeFilters) {
-      delete tradeFilters.collapse;
-    }
-
-    if (sellerScanPath !== path) {
-      return;
-    }
-    sellerScans.set(path, scan);
-    setCurrentSellerScan(scan);
-    scanSellerCounts(scan);
-  }
-
-  function setCurrentSellerScan(scan) {
-    sellerScan = scan;
-    renderSellerPanel();
-    renderSellerCounts();
-  }
-
-  async function scanSellerCounts(scan) {
-    const isCurrent = () => sellerScan === scan;
-    const update = (fields) => {
-      Object.assign(scan, fields);
-      if (sellerScan === scan) {
+    sellerRecountQueued = true;
+    requestAnimationFrame(() => {
+      sellerRecountQueued = false;
+      ensureSellerPanel();
+      const counted = countSellersOnPage();
+      if (counted.signature !== sellerCount.signature) {
+        sellerCount = counted;
         renderSellerPanel();
-        renderSellerCounts();
       }
-    };
-
-    try {
-      if (scan.automatic) {
-        // The page has just searched; wait so a quick run of searches costs one scan, not one each.
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        if (!isCurrent()) {
-          sellerScans.delete(scan.path);
-          return;
-        }
-      }
-
-      const search = await tradeApiRequest(`/api/trade/search/${scan.target.realmLeague}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: scan.query, sort: scan.sort })
-      });
-      const ids = Array.isArray(search.result) ? search.result.slice(0, scan.limit) : [];
-      const sellers = new Map();
-      update({ sellers, searchId: search.id, total: search.total || ids.length, scanned: 0 });
-
-      for (let index = 0; index < ids.length; index += SELLER_FETCH_BATCH) {
-        if (!isCurrent()) {
-          sellerScans.delete(scan.path);
-          return;
-        }
-
-        const batch = ids.slice(index, index + SELLER_FETCH_BATCH);
-        const fetched = await tradeApiRequest(`/api/trade/fetch/${batch.join(',')}?query=${encodeURIComponent(search.id)}`);
-        (fetched.result || []).forEach((entry) => addSellerListing(sellers, entry));
-        update({ scanned: Math.min(index + batch.length, ids.length) });
-      }
-
-      update({ done: true, status: describeSellerCoverage(scan) });
-    } catch (error) {
-      update({ status: `Seller counts failed: ${error.message}`, done: true, error: true });
-    }
+      renderSellerBadges();
+    });
   }
 
-  function addSellerListing(sellers, entry) {
-    const listing = entry && entry.listing;
-    const name = listing && listing.account && listing.account.name;
-    if (!name) {
-      return;
-    }
+  function countSellersOnPage() {
+    const sellers = new Map();
+    let rows = 0;
+    document.querySelectorAll('.resultset .row[data-id]').forEach((row) => {
+      if (row.classList.contains('gone')) {
+        return;
+      }
+      const link = row.querySelector('.info .profile-link a');
+      const name = link && link.textContent.trim();
+      if (!name) {
+        return;
+      }
 
-    let seller = sellers.get(name);
-    if (!seller) {
-      seller = { name, count: 0, prices: new Map(), listings: [] };
-      sellers.set(name, seller);
-    }
-    seller.count += 1;
+      rows += 1;
+      let seller = sellers.get(name);
+      if (!seller) {
+        seller = { name, count: 0, prices: new Map() };
+        sellers.set(name, seller);
+      }
+      seller.count += 1;
 
-    const price = listing.price;
-    seller.listings.push({
-      id: entry.id,
-      token: listing.hideout_token || null,
-      amount: price && typeof price.amount === 'number' ? price.amount : Infinity
+      const price = readRowPrice(row);
+      if (price) {
+        const entry = seller.prices.get(price.currency) || { count: 0, sum: 0, min: Infinity, max: -Infinity };
+        entry.count += 1;
+        entry.sum += price.amount;
+        entry.min = Math.min(entry.min, price.amount);
+        entry.max = Math.max(entry.max, price.amount);
+        seller.prices.set(price.currency, entry);
+      }
     });
 
-    if (price && typeof price.amount === 'number' && price.currency) {
-      const entry = seller.prices.get(price.currency) || { count: 0, sum: 0, min: Infinity, max: -Infinity };
-      entry.count += 1;
-      entry.sum += price.amount;
-      entry.min = Math.min(entry.min, price.amount);
-      entry.max = Math.max(entry.max, price.amount);
-      seller.prices.set(price.currency, entry);
-    }
+    const header = document.querySelector('.results .row-total');
+    const matched = header ? /\(([\d,.]+)\s/.exec(header.textContent) : null;
+    const signature = `${rows}|${Array.from(sellers.values()).map((seller) => `${seller.name}:${seller.count}:${Array.from(seller.prices.entries()).map(([currency, entry]) => `${currency}${entry.sum}`).join('/')}`).join(',')}`;
+    return { sellers, rows, matched: matched ? matched[1] : null, signature };
   }
 
-  function describeSellerCoverage(scan) {
-    if (scan.total > scan.scanned) {
-      return `Counted the cheapest ${scan.scanned} of ${scan.total} listings. A lower max price covers more of the market.`;
+  // "Asking Price: 130 × Chaos Orb" (the first price block of the row; the fee comes after it).
+  function readRowPrice(row) {
+    const block = row.querySelector('.details .price .currency-text');
+    const text = block && block.closest('.s') ? normalizeWhitespace(block.closest('.s').textContent) : '';
+    const match = /([\d.,]+)\s*×\s*(.+)$/.exec(text);
+    if (!match) {
+      return null;
     }
-    return `Counted all ${scan.total} listings.`;
+
+    const amount = Number(match[1].replace(/,/g, ''));
+    return Number.isFinite(amount) ? { amount, currency: match[2].trim() } : null;
   }
 
-  function rankedSellers(scan) {
-    if (!scan || !scan.sellers) {
-      return [];
-    }
-
-    return Array.from(scan.sellers.values())
-      .filter((seller) => seller.count >= Math.max(1, Number(sellerSettings.minListings) || 1))
+  function rankedSellers() {
+    const minListings = Math.max(1, Number(sellerSettings.minListings) || 1);
+    return Array.from(sellerCount.sellers.values())
+      .filter((seller) => seller.count >= minListings)
       .sort((a, b) => b.count - a.count || sellerSortPrice(a) - sellerSortPrice(b));
   }
 
@@ -2274,10 +2159,7 @@
       <div class="tm-handle" title="Sellers with the most listings">Sellers <span class="tm-handle-count"></span></div>
       <div class="tm-body">
         <div class="tm-title">Sellers with the most listings</div>
-        <button type="button" class="btn btn-xs btn-default tm-count">Count sellers</button>
-        <label>Count the cheapest <select class="tm-listings">${SELLER_LISTING_CHOICES.map((choice) => `<option value="${choice}">${choice}</option>`).join('')}</select> listings</label>
         <label>Show sellers with at least <input type="number" class="tm-min" min="1" step="1"> listings</label>
-        <label><input type="checkbox" class="tm-auto"> Count automatically after every search</label>
         <div class="tm-panel-status"></div>
         <div class="tm-seller-list"></div>
       </div>
@@ -2288,20 +2170,10 @@
       saveSellerSettings({ open: !sellerSettings.open });
       renderSellerPanel();
     });
-    panel.querySelector('.tm-count').addEventListener('click', () => {
-      startSellerScan(location.pathname, false);
-    });
-    panel.querySelector('.tm-listings').addEventListener('change', (event) => {
-      saveSellerSettings({ listings: Number(event.target.value) });
-      renderSellerPanel();
-    });
-    panel.querySelector('.tm-auto').addEventListener('change', (event) => {
-      saveSellerSettings({ autoCount: event.target.checked });
-    });
     panel.querySelector('.tm-min').addEventListener('change', (event) => {
       saveSellerSettings({ minListings: Math.max(1, Math.floor(Number(event.target.value)) || 1) });
       renderSellerPanel();
-      renderSellerCounts();
+      renderSellerBadges();
     });
 
     renderSellerPanel();
@@ -2313,45 +2185,23 @@
       return;
     }
 
-    const scan = sellerScan;
-    const sellers = rankedSellers(scan);
+    const sellers = rankedSellers();
     panel.classList.toggle('open', Boolean(sellerSettings.open));
-    panel.querySelector('.tm-auto').checked = Boolean(sellerSettings.autoCount);
-    panel.querySelector('.tm-listings').value = String(sellerSettings.listings);
-    const countButton = panel.querySelector('.tm-count');
-    const target = parseTradeSearchPath(location.pathname);
-    countButton.disabled = !target || Boolean(scan && !scan.done);
-    countButton.textContent = scan && scan.done ? 'Count again' : 'Count sellers';
     const minInput = panel.querySelector('.tm-min');
     if (document.activeElement !== minInput) {
       minInput.value = String(sellerSettings.minListings);
     }
     panel.querySelector('.tm-handle-count').textContent = sellers.length ? String(sellers.length) : '';
 
-    const status = panel.querySelector('.tm-panel-status');
-    let text;
-    if (!scan) {
-      const listings = Number(sellerSettings.listings) || 50;
-      text = target
-        ? `Not counted yet. Counting costs 1 search and ${Math.ceil(listings / SELLER_FETCH_BATCH)} fetches.`
-        : 'Run a search to count its sellers.';
-    } else if (!scan.done) {
-      text = scan.sellers
-        ? `Counting… ${scan.scanned}/${Math.min(scan.total, scan.limit)} listings`
-        : 'Counting… waiting for the search to settle';
-    } else {
-      text = scan.status;
-    }
-    status.textContent = text;
-    status.classList.toggle('tm-error', Boolean(scan && scan.error));
+    const { rows, matched } = sellerCount;
+    panel.querySelector('.tm-panel-status').textContent = rows
+      ? `Counted the ${rows} listings loaded on the page${matched ? ` (${matched} matched)` : ''}. Scroll down to load and count more.`
+      : 'Run a search to count its sellers.';
 
     const list = panel.querySelector('.tm-seller-list');
     list.textContent = '';
-    if (!scan) {
-      return;
-    }
-    if (scan.sellers && !sellers.length && scan.done && !scan.error) {
-      list.textContent = `No seller has ${sellerSettings.minListings} or more of the counted listings.`;
+    if (rows && !sellers.length) {
+      list.textContent = `No seller has ${sellerSettings.minListings} or more of the loaded listings.`;
       return;
     }
 
@@ -2379,220 +2229,34 @@
       travel.className = 'btn btn-xs btn-default';
       travel.textContent = 'Travel';
       travel.title = 'Teleport to this seller\'s hideout';
-      travel.addEventListener('click', () => travelToSeller(scan, seller, travel));
+      travel.addEventListener('click', () => travelToSeller(seller.name));
 
       row.append(count, main, travel);
       list.appendChild(row);
     });
   }
 
-  // Teleports to the seller's hideout the way the site's "Travel to Hideout" button does
-  // (POST /api/trade/whisper with a listing's hideout token). An "in demand" answer carries a
-  // "continue" value; it is sent straight back, so in-demand listings teleport without asking.
-  async function travelToSeller(scan, seller, button) {
-    button.disabled = true;
-    button.textContent = '…';
-    try {
-      const listings = await freshSellerListings(scan, seller);
-      if (!listings.length) {
-        throw new Error('none of this seller\'s counted listings can be travelled to any more (sold or delisted)');
-      }
+  // Presses the site's own "Travel to Hideout" button on the seller's cheapest usable row. The
+  // click passes through handleDirectButtonClick, which confirms an "in demand" answer at once.
+  function travelToSeller(accountName) {
+    const candidates = Array.from(document.querySelectorAll('.resultset .row[data-id]'))
+      .filter((row) => {
+        const link = row.querySelector('.info .profile-link a');
+        return !row.classList.contains('gone') && link && link.textContent.trim() === accountName;
+      })
+      .map((row) => ({ row, button: row.querySelector(DIRECT_BUTTON_SELECTOR), price: readRowPrice(row) }))
+      .filter(({ button }) => button && !button.disabled && !button.classList.contains('disabled') && !button.classList.contains('expired'))
+      .sort((a, b) => (a.price ? a.price.amount : Infinity) - (b.price ? b.price.amount : Infinity));
 
-      let lastError = null;
-      for (const listing of listings) {
-        try {
-          let reply = await sendTradeWhisper({ token: listing.token });
-          if (!reply.success && reply.continue) {
-            reply = await sendTradeWhisper({ token: listing.token, continue: reply.continue });
-          }
-          if (reply.success) {
-            button.textContent = 'Teleporting!';
-            showToast('Teleporting', '', `To ${seller.name}'s hideout.`, false);
-            setTimeout(() => {
-              button.disabled = false;
-              button.textContent = 'Travel';
-            }, 5000);
-            return;
-          }
-          lastError = new Error('the trade site did not confirm the teleport');
-        } catch (error) {
-          // Code 1: this listing's token is no longer valid; another of the seller's may be.
-          lastError = error;
-          if (error.code !== 1) {
-            break;
-          }
-        }
-      }
-      throw lastError;
-    } catch (error) {
-      button.disabled = false;
-      button.textContent = 'Travel';
-      showToast('Travel failed', '', `${seller.name}: ${error.message}`, false);
+    if (!candidates.length) {
+      showToast('Travel not possible', '', `None of ${accountName}'s listings on the page can be travelled to any more (sold or expired). Search again to refresh them.`, false);
+      return;
     }
+
+    candidates[0].button.click();
   }
 
-  // The seller's listings with a hideout token that is still valid, cheapest first. Tokens
-  // expire (the site greys its own button out with "Item must be refreshed"), so expired ones
-  // are fetched again; a listing that comes back without a token has gone.
-  async function freshSellerListings(scan, seller) {
-    const valid = (listing) => listing.token && hideoutTokenExpiry(listing.token) > Date.now() + 15000;
-    // One teleport needs one valid token, so refreshing the cheapest ten stale listings is enough.
-    const stale = seller.listings
-      .filter((listing) => !valid(listing))
-      .sort((a, b) => a.amount - b.amount)
-      .slice(0, SELLER_FETCH_BATCH)
-      .map((listing) => listing.id);
-    if (stale.length) {
-      const fetched = await tradeApiRequest(`/api/trade/fetch/${stale.join(',')}?query=${encodeURIComponent(scan.searchId)}`);
-      (fetched.result || []).forEach((entry) => {
-        const listing = entry && seller.listings.find((candidate) => candidate.id === entry.id);
-        if (listing) {
-          listing.token = (entry.listing && entry.listing.hideout_token) || null;
-        }
-      });
-    }
-
-    return seller.listings.filter(valid).sort((a, b) => a.amount - b.amount);
-  }
-
-  function hideoutTokenExpiry(token) {
-    try {
-      const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-      return (JSON.parse(atob(payload.padEnd(Math.ceil(payload.length / 4) * 4, '='))).exp || 0) * 1000;
-    } catch (_error) {
-      return 0;
-    }
-  }
-
-  async function sendTradeWhisper(body) {
-    // Without the header jQuery adds to the site's own request, the endpoint answers 403 Forbidden.
-    const response = await fetch('/api/trade/whisper', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify(body)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (data.error || !response.ok) {
-      const error = new Error((data.error && data.error.message) || `HTTP ${response.status}`);
-      error.code = data.error && data.error.code;
-      throw error;
-    }
-    return data;
-  }
-
-  function parseTradeSearchPath(path) {
-    // /trade/search/<League>/<id>, or /trade/search/<realm>/<League>/<id> on console realms.
-    const parts = path.split('/').filter(Boolean);
-    if (parts[parts.length - 1] === 'live') {
-      parts.pop();
-    }
-    if (parts[0] !== 'trade' || parts[1] !== 'search' || parts.length < 4) {
-      return null;
-    }
-
-    return {
-      realmLeague: parts.slice(2, -1).map(encodeURIComponent).join('/'),
-      id: parts[parts.length - 1]
-    };
-  }
-
-  // The site encodes the whole query in the URL as base64url-encoded gzip JSON ("H4sI…").
-  async function decodeTradeSearchId(id) {
-    if (!id.startsWith('H4sI')) {
-      return null;
-    }
-
-    const base64 = id.replace(/-/g, '+').replace(/_/g, '/');
-    const bytes = Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')), (char) => char.charCodeAt(0));
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return JSON.parse(await new Response(stream).text());
-  }
-
-  // Earliest time for the next request, per API policy (search and fetch are limited apart),
-  // and the end of a lockout the site has imposed, during which no scan request is sent at all
-  // (another request then would only extend it).
-  const tradeApiNextAt = { search: 0, fetch: 0 };
-  const tradeApiLockedUntil = { search: 0, fetch: 0 };
-
-  // The scan keeps every rate-limit window under half full: a rule that is still under half
-  // allows a request a second, one at half or more drops to half its sustained rate. The rest
-  // of the budget stays with the page itself (searching, loading rows, travelling to hideouts).
-  async function tradeApiRequest(url, options) {
-    const policy = url.startsWith('/api/trade/search/') ? 'search' : 'fetch';
-    const lockedFor = () => Math.ceil((tradeApiLockedUntil[policy] - Date.now()) / 1000);
-    if (lockedFor() > 0) {
-      throw new Error(`rate limited by the trade site, try again in ${lockedFor()}s`);
-    }
-    const wait = tradeApiNextAt[policy] - Date.now();
-    if (wait > 0) {
-      await new Promise((resolve) => setTimeout(resolve, wait));
-    }
-
-    const response = await fetch(url, options);
-    let interval = 1500;
-    response.headers.forEach((value, name) => {
-      if (!/^x-rate-limit-(?!rules$|policy$)[a-z]+$/i.test(name)) {
-        return;
-      }
-
-      const states = (response.headers.get(`${name}-state`) || '').split(',');
-      value.split(',').forEach((rule, index) => {
-        const [hits, period] = rule.split(':').map(Number);
-        const [used, , penalty] = (states[index] || '').split(':').map(Number);
-        if (penalty > 0) {
-          tradeApiLockedUntil[policy] = Math.max(tradeApiLockedUntil[policy], Date.now() + penalty * 1000);
-        }
-        if (hits > 0 && period > 0 && (used || 0) + 1 >= hits / 2) {
-          interval = Math.max(interval, (period * 1000 * 2) / hits);
-        }
-      });
-    });
-    tradeApiNextAt[policy] = Date.now() + interval;
-
-    if (response.status === 429) {
-      const retryAfter = Number(response.headers.get('Retry-After')) || 60;
-      tradeApiLockedUntil[policy] = Math.max(tradeApiLockedUntil[policy], Date.now() + retryAfter * 1000);
-      throw new Error(`rate limited by the trade site, try again in ${lockedFor()}s`);
-    }
-
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.error) {
-      throw new Error((data.error && data.error.message) || `HTTP ${response.status}`);
-    }
-
-    return data;
-  }
-
-  function renderSellerCounts() {
-    const scan = sellerScan;
-    const header = document.querySelector('.results .row-total');
-    if (header) {
-      let status = header.querySelector(`.${SELLER_STATUS_CLASS}`);
-      let text = '';
-      if (scan) {
-        if (!scan.done) {
-          text = `Counting sellers… ${scan.scanned}${scan.sellers ? `/${Math.min(scan.total, scan.limit)}` : ''}`;
-        } else if (scan.error) {
-          text = scan.status;
-        } else {
-          const ranked = rankedSellers(scan).length;
-          text = `${ranked} seller${ranked === 1 ? '' : 's'} with ${sellerSettings.minListings}+ listings (Sellers tab)`;
-        }
-      }
-      if (!status && text) {
-        status = document.createElement('span');
-        status.className = SELLER_STATUS_CLASS;
-        header.appendChild(status);
-      }
-      if (status) {
-        if (status.textContent !== text) {
-          status.textContent = text;
-        }
-        status.classList.toggle('tm-error', Boolean(scan && scan.error));
-      }
-    }
-
-    const sellers = scan && scan.sellers;
+  function renderSellerBadges() {
     const minListings = Math.max(2, Number(sellerSettings.minListings) || 2);
     document.querySelectorAll('.resultset .row[data-id]').forEach((row) => {
       const link = row.querySelector('.info .profile-link a');
@@ -2600,7 +2264,7 @@
         return;
       }
 
-      const seller = sellers ? sellers.get(link.textContent.trim()) : null;
+      const seller = sellerCount.sellers.get(link.textContent.trim());
       const count = seller ? seller.count : 0;
       let badge = link.parentElement.querySelector(`.${SELLER_BADGE_CLASS}`);
       if (count < minListings) {
@@ -2618,7 +2282,7 @@
       }
       if (badge.textContent !== text) {
         badge.textContent = text;
-        badge.title = `This seller has ${count} of the ${scan.scanned} counted listings for this search (${scan.total} matched in total).`;
+        badge.title = `This seller has ${count} of the ${sellerCount.rows} listings loaded on the page.`;
       }
     });
   }
