@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.3
+// @version      0.9.4
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -61,6 +61,20 @@
   let autoConfirmClickInFlight = false;
   const autoConfirmWatchers = new Map();
 
+  // Seller ranking: the trade API hands out at most 100 ids per search, so the counts cover
+  // the first 100 listings in the search's sort order (cheapest first by default).
+  const SELLER_BADGE_CLASS = 'tm-poe-trade-seller-count';
+  const SELLER_STATUS_CLASS = 'tm-poe-trade-seller-status';
+  const SELLER_PANEL_ID = 'tm-poe-trade-seller-panel';
+  const SELLER_SETTINGS_KEY = 'tm-poe-trade-seller-settings-v1';
+  const SELLER_FETCH_BATCH = 10;
+  const SELLER_SCAN_LIMIT = 100;
+  const SELLER_SCAN_REUSE_MS = 2 * 60 * 1000;
+  const sellerSettings = readSellerSettings();
+  const sellerScans = new Map();
+  let sellerScanPath = null;
+  let sellerScan = null;
+
   function init() {
     injectStyles();
     ensureToast();
@@ -68,6 +82,7 @@
     injectResultButtons();
     observeDom();
     setupInDemandAutoConfirm();
+    watchSellerCounts();
   }
 
   function injectStyles() {
@@ -162,6 +177,143 @@
         letter-spacing: 0.02em;
       }
 
+      .${SELLER_BADGE_CLASS} {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 0 5px;
+        border: 1px solid #8b6c2f;
+        border-radius: 3px;
+        background: #2a1f0b;
+        color: #f8d88c;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 16px;
+        cursor: help;
+      }
+
+      .${SELLER_STATUS_CLASS} {
+        margin-left: 12px;
+        color: #b9ab87;
+        font-size: 12px;
+      }
+
+      .${SELLER_STATUS_CLASS}.tm-error {
+        color: #e0806a;
+      }
+
+      #${SELLER_PANEL_ID} {
+        position: fixed;
+        top: 140px;
+        right: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: flex-start;
+        font: 12px/1.4 Verdana, sans-serif;
+        color: #f0e6d2;
+      }
+
+      #${SELLER_PANEL_ID} .tm-handle {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        padding: 10px 5px;
+        background: rgba(15, 15, 15, 0.96);
+        border: 1px solid #8b6c2f;
+        border-left: none;
+        color: #f8d88c;
+        font-weight: 700;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      #${SELLER_PANEL_ID} .tm-handle .tm-handle-count {
+        display: inline-block;
+        margin-top: 6px;
+        padding: 3px 0;
+        background: #8b6c2f;
+        color: #0b0b0b;
+        border-radius: 3px;
+      }
+
+      #${SELLER_PANEL_ID} .tm-body {
+        display: none;
+        width: 360px;
+        max-height: 70vh;
+        overflow-y: auto;
+        background: rgba(15, 15, 15, 0.96);
+        border: 1px solid #8b6c2f;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+        padding: 10px 12px;
+      }
+
+      #${SELLER_PANEL_ID}.open .tm-body {
+        display: block;
+      }
+
+      #${SELLER_PANEL_ID} .tm-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #f8d88c;
+        margin-bottom: 8px;
+      }
+
+      #${SELLER_PANEL_ID} label {
+        display: block;
+        margin-bottom: 6px;
+        color: #d7c9a8;
+        cursor: pointer;
+      }
+
+      #${SELLER_PANEL_ID} input[type="number"] {
+        width: 48px;
+        background: #0b0b0b;
+        color: #f0e6d2;
+        border: 1px solid #59451d;
+      }
+
+      #${SELLER_PANEL_ID} .tm-panel-status {
+        margin: 8px 0;
+        color: #b9ab87;
+      }
+
+      #${SELLER_PANEL_ID} .tm-panel-status.tm-error {
+        color: #e0806a;
+      }
+
+      #${SELLER_PANEL_ID} .tm-seller {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 0;
+        border-top: 1px solid #2c2414;
+      }
+
+      #${SELLER_PANEL_ID} .tm-seller-count {
+        min-width: 34px;
+        color: #f8d88c;
+        font-weight: 700;
+        font-size: 14px;
+      }
+
+      #${SELLER_PANEL_ID} .tm-seller-main {
+        flex: 1;
+        min-width: 0;
+      }
+
+      #${SELLER_PANEL_ID} .tm-seller-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      #${SELLER_PANEL_ID} .tm-seller-price {
+        color: #b9ab87;
+        font-size: 11px;
+      }
+
+      #${SELLER_PANEL_ID} .tm-seller button {
+        flex: 0 0 auto;
+      }
+
     `;
     document.head.appendChild(style);
   }
@@ -187,6 +339,7 @@
       ensureToast();
       injectGlobalCopyButton();
       injectResultButtons();
+      watchSellerCounts();
     });
 
     observer.observe(document.documentElement, {
@@ -1894,6 +2047,555 @@
       .replace(/[#%'-]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  // Seller ranking, for buying many items in few trades. A side tab opens a panel that lists
+  // the sellers of the current search with the most listings first; "Travel" teleports
+  // straight to that seller's hideout. Rows also get a "×N" badge. The counts
+  // come from a second search without "Collapse listings by account", which would hide
+  // exactly the extra listings, made once per search URL.
+  function readSellerSettings() {
+    const defaults = { enabled: true, open: false, minListings: 2 };
+    try {
+      return { ...defaults, ...JSON.parse(localStorage.getItem(SELLER_SETTINGS_KEY) || '{}') };
+    } catch (_error) {
+      return defaults;
+    }
+  }
+
+  function saveSellerSettings(changes) {
+    Object.assign(sellerSettings, changes);
+    try {
+      localStorage.setItem(SELLER_SETTINGS_KEY, JSON.stringify(sellerSettings));
+    } catch (error) {
+      showToast('Seller settings not saved', '', error.message, false);
+    }
+  }
+
+  function watchSellerCounts() {
+    ensureSellerPanel();
+    const path = location.pathname;
+    if (path !== sellerScanPath) {
+      sellerScanPath = path;
+      if (sellerSettings.enabled) {
+        startSellerScan(path);
+      }
+    }
+    renderSellerCounts();
+  }
+
+  async function startSellerScan(path) {
+    const reusable = sellerScans.get(path);
+    if (reusable && !reusable.error && Date.now() - reusable.startedAt < SELLER_SCAN_REUSE_MS) {
+      setCurrentSellerScan(reusable);
+      return;
+    }
+
+    const target = parseTradeSearchPath(path);
+    if (!target) {
+      return;
+    }
+
+    const scan = {
+      path,
+      target,
+      query: null,
+      sort: null,
+      startedAt: Date.now(),
+      status: '',
+      done: false,
+      error: false,
+      sellers: null,
+      scanned: 0,
+      total: 0
+    };
+
+    let body = null;
+    try {
+      body = await decodeTradeSearchId(target.id);
+    } catch (error) {
+      body = null;
+    }
+    if (!body) {
+      Object.assign(scan, { status: 'This search URL carries no readable query, so sellers cannot be counted.', done: true, error: true });
+      setCurrentSellerScan(scan);
+      return;
+    }
+
+    scan.query = JSON.parse(JSON.stringify(body.query || body));
+    scan.sort = body.sort || { price: 'asc' };
+    const tradeFilters = scan.query.filters && scan.query.filters.trade_filters && scan.query.filters.trade_filters.filters;
+    if (tradeFilters && tradeFilters.account) {
+      // A single seller's listings (opened from the panel): keep the ranking it came from.
+      return;
+    }
+    if (tradeFilters) {
+      delete tradeFilters.collapse;
+    }
+
+    if (sellerScanPath !== path) {
+      return;
+    }
+    sellerScans.set(path, scan);
+    setCurrentSellerScan(scan);
+    scanSellerCounts(scan);
+  }
+
+  function setCurrentSellerScan(scan) {
+    sellerScan = scan;
+    renderSellerPanel();
+    renderSellerCounts();
+  }
+
+  async function scanSellerCounts(scan) {
+    const isCurrent = () => sellerScan === scan && sellerSettings.enabled;
+    const update = (fields) => {
+      Object.assign(scan, fields);
+      if (sellerScan === scan) {
+        renderSellerPanel();
+        renderSellerCounts();
+      }
+    };
+
+    try {
+      // The page has just searched; wait so a quick run of searches costs one scan, not one each.
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (!isCurrent()) {
+        sellerScans.delete(scan.path);
+        return;
+      }
+
+      const search = await tradeApiRequest(`/api/trade/search/${scan.target.realmLeague}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: scan.query, sort: scan.sort })
+      });
+      const ids = Array.isArray(search.result) ? search.result.slice(0, SELLER_SCAN_LIMIT) : [];
+      const sellers = new Map();
+      update({ sellers, searchId: search.id, total: search.total || ids.length, scanned: 0 });
+
+      for (let index = 0; index < ids.length; index += SELLER_FETCH_BATCH) {
+        if (!isCurrent()) {
+          sellerScans.delete(scan.path);
+          return;
+        }
+
+        const batch = ids.slice(index, index + SELLER_FETCH_BATCH);
+        const fetched = await tradeApiRequest(`/api/trade/fetch/${batch.join(',')}?query=${encodeURIComponent(search.id)}`);
+        (fetched.result || []).forEach((entry) => addSellerListing(sellers, entry));
+        update({ scanned: Math.min(index + batch.length, ids.length) });
+      }
+
+      update({ done: true, status: describeSellerCoverage(scan) });
+    } catch (error) {
+      update({ status: `Seller counts failed: ${error.message}`, done: true, error: true });
+    }
+  }
+
+  function addSellerListing(sellers, entry) {
+    const listing = entry && entry.listing;
+    const name = listing && listing.account && listing.account.name;
+    if (!name) {
+      return;
+    }
+
+    let seller = sellers.get(name);
+    if (!seller) {
+      seller = { name, count: 0, prices: new Map(), listings: [] };
+      sellers.set(name, seller);
+    }
+    seller.count += 1;
+
+    const price = listing.price;
+    seller.listings.push({
+      id: entry.id,
+      token: listing.hideout_token || null,
+      amount: price && typeof price.amount === 'number' ? price.amount : Infinity
+    });
+
+    if (price && typeof price.amount === 'number' && price.currency) {
+      const entry = seller.prices.get(price.currency) || { count: 0, sum: 0, min: Infinity, max: -Infinity };
+      entry.count += 1;
+      entry.sum += price.amount;
+      entry.min = Math.min(entry.min, price.amount);
+      entry.max = Math.max(entry.max, price.amount);
+      seller.prices.set(price.currency, entry);
+    }
+  }
+
+  function describeSellerCoverage(scan) {
+    if (scan.total > scan.scanned) {
+      return `Counted the cheapest ${scan.scanned} of ${scan.total} listings. A lower max price covers more of the market.`;
+    }
+    return `Counted all ${scan.total} listings.`;
+  }
+
+  function rankedSellers(scan) {
+    if (!scan || !scan.sellers) {
+      return [];
+    }
+
+    return Array.from(scan.sellers.values())
+      .filter((seller) => seller.count >= Math.max(1, Number(sellerSettings.minListings) || 1))
+      .sort((a, b) => b.count - a.count || sellerSortPrice(a) - sellerSortPrice(b));
+  }
+
+  function sellerSortPrice(seller) {
+    const cheapest = Array.from(seller.prices.values()).map((entry) => entry.min);
+    return cheapest.length ? Math.min(...cheapest) : Infinity;
+  }
+
+  function formatSellerPrices(seller) {
+    return Array.from(seller.prices.entries())
+      .map(([currency, entry]) => {
+        const range = entry.min === entry.max ? `${formatAmount(entry.min)}` : `${formatAmount(entry.min)}–${formatAmount(entry.max)}`;
+        return `${range} ${currency} each · ${formatAmount(entry.sum)} ${currency} for ${entry.count}`;
+      })
+      .join(' | ') || 'no price';
+  }
+
+  function formatAmount(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function ensureSellerPanel() {
+    if (document.getElementById(SELLER_PANEL_ID) || !document.body) {
+      return;
+    }
+
+    const panel = document.createElement('div');
+    panel.id = SELLER_PANEL_ID;
+    panel.innerHTML = `
+      <div class="tm-handle" title="Sellers with the most listings">Sellers <span class="tm-handle-count"></span></div>
+      <div class="tm-body">
+        <div class="tm-title">Sellers with the most listings</div>
+        <label><input type="checkbox" class="tm-enabled"> Count sellers on every search</label>
+        <label>Show sellers with at least <input type="number" class="tm-min" min="1" step="1"> listings</label>
+        <div class="tm-panel-status"></div>
+        <div class="tm-seller-list"></div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+
+    panel.querySelector('.tm-handle').addEventListener('click', () => {
+      saveSellerSettings({ open: !sellerSettings.open });
+      renderSellerPanel();
+    });
+    panel.querySelector('.tm-enabled').addEventListener('change', (event) => {
+      saveSellerSettings({ enabled: event.target.checked });
+      if (sellerSettings.enabled) {
+        startSellerScan(location.pathname);
+      } else {
+        sellerScan = null;
+      }
+      renderSellerPanel();
+      renderSellerCounts();
+    });
+    panel.querySelector('.tm-min').addEventListener('change', (event) => {
+      saveSellerSettings({ minListings: Math.max(1, Math.floor(Number(event.target.value)) || 1) });
+      renderSellerPanel();
+      renderSellerCounts();
+    });
+
+    renderSellerPanel();
+  }
+
+  function renderSellerPanel() {
+    const panel = document.getElementById(SELLER_PANEL_ID);
+    if (!panel) {
+      return;
+    }
+
+    const scan = sellerScan;
+    const sellers = rankedSellers(scan);
+    panel.classList.toggle('open', Boolean(sellerSettings.open));
+    panel.querySelector('.tm-enabled').checked = Boolean(sellerSettings.enabled);
+    const minInput = panel.querySelector('.tm-min');
+    if (document.activeElement !== minInput) {
+      minInput.value = String(sellerSettings.minListings);
+    }
+    panel.querySelector('.tm-handle-count').textContent = sellers.length ? String(sellers.length) : '';
+
+    const status = panel.querySelector('.tm-panel-status');
+    let text;
+    if (!sellerSettings.enabled) {
+      text = 'Off. Tick the box to count sellers on this search.';
+    } else if (!scan) {
+      text = 'Run a search to count its sellers.';
+    } else if (!scan.done) {
+      text = scan.sellers
+        ? `Counting… ${scan.scanned}/${Math.min(scan.total, SELLER_SCAN_LIMIT)} listings`
+        : 'Counting… waiting for the search to settle';
+    } else {
+      text = scan.status;
+    }
+    status.textContent = text;
+    status.classList.toggle('tm-error', Boolean(scan && scan.error));
+
+    const list = panel.querySelector('.tm-seller-list');
+    list.textContent = '';
+    if (!sellerSettings.enabled || !scan) {
+      return;
+    }
+    if (scan.sellers && !sellers.length && scan.done && !scan.error) {
+      list.textContent = `No seller has ${sellerSettings.minListings} or more of the counted listings.`;
+      return;
+    }
+
+    sellers.forEach((seller) => {
+      const row = document.createElement('div');
+      row.className = 'tm-seller';
+
+      const count = document.createElement('div');
+      count.className = 'tm-seller-count';
+      count.textContent = `×${seller.count}`;
+
+      const main = document.createElement('div');
+      main.className = 'tm-seller-main';
+      const name = document.createElement('div');
+      name.className = 'tm-seller-name';
+      name.textContent = seller.name;
+      name.title = seller.name;
+      const price = document.createElement('div');
+      price.className = 'tm-seller-price';
+      price.textContent = formatSellerPrices(seller);
+      main.append(name, price);
+
+      const travel = document.createElement('button');
+      travel.type = 'button';
+      travel.className = 'btn btn-xs btn-default';
+      travel.textContent = 'Travel';
+      travel.title = 'Teleport to this seller\'s hideout';
+      travel.addEventListener('click', () => travelToSeller(scan, seller, travel));
+
+      row.append(count, main, travel);
+      list.appendChild(row);
+    });
+  }
+
+  // Teleports to the seller's hideout the way the site's "Travel to Hideout" button does
+  // (POST /api/trade/whisper with a listing's hideout token). An "in demand" answer carries a
+  // "continue" value; it is sent straight back, so in-demand listings teleport without asking.
+  async function travelToSeller(scan, seller, button) {
+    button.disabled = true;
+    button.textContent = '…';
+    try {
+      const listings = await freshSellerListings(scan, seller);
+      if (!listings.length) {
+        throw new Error('none of this seller\'s counted listings can be travelled to any more (sold or delisted)');
+      }
+
+      let lastError = null;
+      for (const listing of listings) {
+        try {
+          let reply = await sendTradeWhisper({ token: listing.token });
+          if (!reply.success && reply.continue) {
+            reply = await sendTradeWhisper({ token: listing.token, continue: reply.continue });
+          }
+          if (reply.success) {
+            button.textContent = 'Teleporting!';
+            showToast('Teleporting', '', `To ${seller.name}'s hideout.`, false);
+            setTimeout(() => {
+              button.disabled = false;
+              button.textContent = 'Travel';
+            }, 5000);
+            return;
+          }
+          lastError = new Error('the trade site did not confirm the teleport');
+        } catch (error) {
+          // Code 1: this listing's token is no longer valid; another of the seller's may be.
+          lastError = error;
+          if (error.code !== 1) {
+            break;
+          }
+        }
+      }
+      throw lastError;
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = 'Travel';
+      showToast('Travel failed', '', `${seller.name}: ${error.message}`, false);
+    }
+  }
+
+  // The seller's listings with a hideout token that is still valid, cheapest first. Tokens
+  // expire (the site greys its own button out with "Item must be refreshed"), so expired ones
+  // are fetched again; a listing that comes back without a token has gone.
+  async function freshSellerListings(scan, seller) {
+    const valid = (listing) => listing.token && hideoutTokenExpiry(listing.token) > Date.now() + 15000;
+    // One teleport needs one valid token, so refreshing the cheapest ten stale listings is enough.
+    const stale = seller.listings
+      .filter((listing) => !valid(listing))
+      .sort((a, b) => a.amount - b.amount)
+      .slice(0, SELLER_FETCH_BATCH)
+      .map((listing) => listing.id);
+    if (stale.length) {
+      const fetched = await tradeApiRequest(`/api/trade/fetch/${stale.join(',')}?query=${encodeURIComponent(scan.searchId)}`);
+      (fetched.result || []).forEach((entry) => {
+        const listing = entry && seller.listings.find((candidate) => candidate.id === entry.id);
+        if (listing) {
+          listing.token = (entry.listing && entry.listing.hideout_token) || null;
+        }
+      });
+    }
+
+    return seller.listings.filter(valid).sort((a, b) => a.amount - b.amount);
+  }
+
+  function hideoutTokenExpiry(token) {
+    try {
+      const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      return (JSON.parse(atob(payload.padEnd(Math.ceil(payload.length / 4) * 4, '='))).exp || 0) * 1000;
+    } catch (_error) {
+      return 0;
+    }
+  }
+
+  async function sendTradeWhisper(body) {
+    const response = await fetch('/api/trade/whisper', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (data.error || !response.ok) {
+      const error = new Error((data.error && data.error.message) || `HTTP ${response.status}`);
+      error.code = data.error && data.error.code;
+      throw error;
+    }
+    return data;
+  }
+
+  function parseTradeSearchPath(path) {
+    // /trade/search/<League>/<id>, or /trade/search/<realm>/<League>/<id> on console realms.
+    const parts = path.split('/').filter(Boolean);
+    if (parts[parts.length - 1] === 'live') {
+      parts.pop();
+    }
+    if (parts[0] !== 'trade' || parts[1] !== 'search' || parts.length < 4) {
+      return null;
+    }
+
+    return {
+      realmLeague: parts.slice(2, -1).map(encodeURIComponent).join('/'),
+      id: parts[parts.length - 1]
+    };
+  }
+
+  // The site encodes the whole query in the URL as base64url-encoded gzip JSON ("H4sI…").
+  async function decodeTradeSearchId(id) {
+    if (!id.startsWith('H4sI')) {
+      return null;
+    }
+
+    const base64 = id.replace(/-/g, '+').replace(/_/g, '/');
+    const bytes = Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')), (char) => char.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return JSON.parse(await new Response(stream).text());
+  }
+
+  // Earliest time for the next request, per API policy (search and fetch are limited apart).
+  const tradeApiNextAt = { search: 0, fetch: 0 };
+
+  // The scan keeps every rate-limit window under half full: a rule that is still under half
+  // allows a request a second, one at half or more drops to half its sustained rate. The rest
+  // of the budget stays with the page itself (searching, loading rows, travelling to hideouts).
+  async function tradeApiRequest(url, options) {
+    const policy = url.startsWith('/api/trade/search/') ? 'search' : 'fetch';
+    const wait = tradeApiNextAt[policy] - Date.now();
+    if (wait > 0) {
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+
+    const response = await fetch(url, options);
+    let interval = 1000;
+    response.headers.forEach((value, name) => {
+      if (!/^x-rate-limit-(?!rules$|policy$)[a-z]+$/i.test(name)) {
+        return;
+      }
+
+      const states = (response.headers.get(`${name}-state`) || '').split(',');
+      value.split(',').forEach((rule, index) => {
+        const [hits, period] = rule.split(':').map(Number);
+        const used = Number((states[index] || '').split(':')[0]) || 0;
+        if (hits > 0 && period > 0 && used + 1 >= hits / 2) {
+          interval = Math.max(interval, (period * 1000 * 2) / hits);
+        }
+      });
+    });
+    tradeApiNextAt[policy] = Date.now() + interval;
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('Retry-After');
+      throw new Error(`rate limited by the trade site${retryAfter ? `, retry in ${retryAfter}s` : ''}`);
+    }
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error((data.error && data.error.message) || `HTTP ${response.status}`);
+    }
+
+    return data;
+  }
+
+  function renderSellerCounts() {
+    const scan = sellerSettings.enabled ? sellerScan : null;
+    const header = document.querySelector('.results .row-total');
+    if (header) {
+      let status = header.querySelector(`.${SELLER_STATUS_CLASS}`);
+      let text = '';
+      if (scan) {
+        if (!scan.done) {
+          text = `Counting sellers… ${scan.scanned}${scan.sellers ? `/${Math.min(scan.total, SELLER_SCAN_LIMIT)}` : ''}`;
+        } else if (scan.error) {
+          text = scan.status;
+        } else {
+          const ranked = rankedSellers(scan).length;
+          text = `${ranked} seller${ranked === 1 ? '' : 's'} with ${sellerSettings.minListings}+ listings (Sellers tab)`;
+        }
+      }
+      if (!status && text) {
+        status = document.createElement('span');
+        status.className = SELLER_STATUS_CLASS;
+        header.appendChild(status);
+      }
+      if (status) {
+        if (status.textContent !== text) {
+          status.textContent = text;
+        }
+        status.classList.toggle('tm-error', Boolean(scan && scan.error));
+      }
+    }
+
+    const sellers = scan && scan.sellers;
+    const minListings = Math.max(2, Number(sellerSettings.minListings) || 2);
+    document.querySelectorAll('.resultset .row[data-id]').forEach((row) => {
+      const link = row.querySelector('.info .profile-link a');
+      if (!link) {
+        return;
+      }
+
+      const seller = sellers ? sellers.get(link.textContent.trim()) : null;
+      const count = seller ? seller.count : 0;
+      let badge = link.parentElement.querySelector(`.${SELLER_BADGE_CLASS}`);
+      if (count < minListings) {
+        if (badge) {
+          badge.remove();
+        }
+        return;
+      }
+
+      const text = `×${count}`;
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = SELLER_BADGE_CLASS;
+        link.after(badge);
+      }
+      if (badge.textContent !== text) {
+        badge.textContent = text;
+        badge.title = `This seller has ${count} of the ${scan.scanned} counted listings for this search (${scan.total} matched in total).`;
+      }
+    });
   }
 
   let toastTimer = null;
