@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.5
+// @version      0.9.6
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -66,10 +66,10 @@
   const SELLER_BADGE_CLASS = 'tm-poe-trade-seller-count';
   const SELLER_STATUS_CLASS = 'tm-poe-trade-seller-status';
   const SELLER_PANEL_ID = 'tm-poe-trade-seller-panel';
-  const SELLER_SETTINGS_KEY = 'tm-poe-trade-seller-settings-v1';
+  const SELLER_SETTINGS_KEY = 'tm-poe-trade-seller-settings-v2';
+  const SELLER_LISTING_CHOICES = [30, 50, 100];
   const SELLER_FETCH_BATCH = 10;
-  const SELLER_SCAN_LIMIT = 100;
-  const SELLER_SCAN_REUSE_MS = 2 * 60 * 1000;
+  const SELLER_SCAN_REUSE_MS = 5 * 60 * 1000;
   const sellerSettings = readSellerSettings();
   const sellerScans = new Map();
   let sellerScanPath = null;
@@ -2053,9 +2053,10 @@
   // the sellers of the current search with the most listings first; "Travel" teleports
   // straight to that seller's hideout. Rows also get a "×N" badge. The counts
   // come from a second search without "Collapse listings by account", which would hide
-  // exactly the extra listings, made once per search URL.
+  // exactly the extra listings. Counting costs 1 search and 1 fetch per 10 listings, so it
+  // runs when asked ("Count sellers") unless automatic counting is switched on.
   function readSellerSettings() {
-    const defaults = { enabled: true, open: false, minListings: 2 };
+    const defaults = { autoCount: false, open: false, minListings: 2, listings: 50 };
     try {
       return { ...defaults, ...JSON.parse(localStorage.getItem(SELLER_SETTINGS_KEY) || '{}') };
     } catch (_error) {
@@ -2077,17 +2078,17 @@
     const path = location.pathname;
     if (path !== sellerScanPath) {
       sellerScanPath = path;
-      if (sellerSettings.enabled) {
-        startSellerScan(path);
+      const reusable = sellerScans.get(path);
+      setCurrentSellerScan(reusable && !reusable.error && Date.now() - reusable.startedAt < SELLER_SCAN_REUSE_MS ? reusable : null);
+      if (sellerSettings.autoCount && !sellerScan) {
+        startSellerScan(path, true);
       }
     }
     renderSellerCounts();
   }
 
-  async function startSellerScan(path) {
-    const reusable = sellerScans.get(path);
-    if (reusable && !reusable.error && Date.now() - reusable.startedAt < SELLER_SCAN_REUSE_MS) {
-      setCurrentSellerScan(reusable);
+  async function startSellerScan(path, automatic) {
+    if (sellerScan && sellerScan.path === path && !sellerScan.done) {
       return;
     }
 
@@ -2102,6 +2103,8 @@
       query: null,
       sort: null,
       startedAt: Date.now(),
+      automatic,
+      limit: SELLER_LISTING_CHOICES.includes(Number(sellerSettings.listings)) ? Number(sellerSettings.listings) : 50,
       status: '',
       done: false,
       error: false,
@@ -2148,7 +2151,7 @@
   }
 
   async function scanSellerCounts(scan) {
-    const isCurrent = () => sellerScan === scan && sellerSettings.enabled;
+    const isCurrent = () => sellerScan === scan;
     const update = (fields) => {
       Object.assign(scan, fields);
       if (sellerScan === scan) {
@@ -2158,11 +2161,13 @@
     };
 
     try {
-      // The page has just searched; wait so a quick run of searches costs one scan, not one each.
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      if (!isCurrent()) {
-        sellerScans.delete(scan.path);
-        return;
+      if (scan.automatic) {
+        // The page has just searched; wait so a quick run of searches costs one scan, not one each.
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        if (!isCurrent()) {
+          sellerScans.delete(scan.path);
+          return;
+        }
       }
 
       const search = await tradeApiRequest(`/api/trade/search/${scan.target.realmLeague}`, {
@@ -2170,7 +2175,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: scan.query, sort: scan.sort })
       });
-      const ids = Array.isArray(search.result) ? search.result.slice(0, SELLER_SCAN_LIMIT) : [];
+      const ids = Array.isArray(search.result) ? search.result.slice(0, scan.limit) : [];
       const sellers = new Map();
       update({ sellers, searchId: search.id, total: search.total || ids.length, scanned: 0 });
 
@@ -2269,8 +2274,10 @@
       <div class="tm-handle" title="Sellers with the most listings">Sellers <span class="tm-handle-count"></span></div>
       <div class="tm-body">
         <div class="tm-title">Sellers with the most listings</div>
-        <label><input type="checkbox" class="tm-enabled"> Count sellers on every search</label>
+        <button type="button" class="btn btn-xs btn-default tm-count">Count sellers</button>
+        <label>Count the cheapest <select class="tm-listings">${SELLER_LISTING_CHOICES.map((choice) => `<option value="${choice}">${choice}</option>`).join('')}</select> listings</label>
         <label>Show sellers with at least <input type="number" class="tm-min" min="1" step="1"> listings</label>
+        <label><input type="checkbox" class="tm-auto"> Count automatically after every search</label>
         <div class="tm-panel-status"></div>
         <div class="tm-seller-list"></div>
       </div>
@@ -2281,15 +2288,15 @@
       saveSellerSettings({ open: !sellerSettings.open });
       renderSellerPanel();
     });
-    panel.querySelector('.tm-enabled').addEventListener('change', (event) => {
-      saveSellerSettings({ enabled: event.target.checked });
-      if (sellerSettings.enabled) {
-        startSellerScan(location.pathname);
-      } else {
-        sellerScan = null;
-      }
+    panel.querySelector('.tm-count').addEventListener('click', () => {
+      startSellerScan(location.pathname, false);
+    });
+    panel.querySelector('.tm-listings').addEventListener('change', (event) => {
+      saveSellerSettings({ listings: Number(event.target.value) });
       renderSellerPanel();
-      renderSellerCounts();
+    });
+    panel.querySelector('.tm-auto').addEventListener('change', (event) => {
+      saveSellerSettings({ autoCount: event.target.checked });
     });
     panel.querySelector('.tm-min').addEventListener('change', (event) => {
       saveSellerSettings({ minListings: Math.max(1, Math.floor(Number(event.target.value)) || 1) });
@@ -2309,7 +2316,12 @@
     const scan = sellerScan;
     const sellers = rankedSellers(scan);
     panel.classList.toggle('open', Boolean(sellerSettings.open));
-    panel.querySelector('.tm-enabled').checked = Boolean(sellerSettings.enabled);
+    panel.querySelector('.tm-auto').checked = Boolean(sellerSettings.autoCount);
+    panel.querySelector('.tm-listings').value = String(sellerSettings.listings);
+    const countButton = panel.querySelector('.tm-count');
+    const target = parseTradeSearchPath(location.pathname);
+    countButton.disabled = !target || Boolean(scan && !scan.done);
+    countButton.textContent = scan && scan.done ? 'Count again' : 'Count sellers';
     const minInput = panel.querySelector('.tm-min');
     if (document.activeElement !== minInput) {
       minInput.value = String(sellerSettings.minListings);
@@ -2318,13 +2330,14 @@
 
     const status = panel.querySelector('.tm-panel-status');
     let text;
-    if (!sellerSettings.enabled) {
-      text = 'Off. Tick the box to count sellers on this search.';
-    } else if (!scan) {
-      text = 'Run a search to count its sellers.';
+    if (!scan) {
+      const listings = Number(sellerSettings.listings) || 50;
+      text = target
+        ? `Not counted yet. Counting costs 1 search and ${Math.ceil(listings / SELLER_FETCH_BATCH)} fetches.`
+        : 'Run a search to count its sellers.';
     } else if (!scan.done) {
       text = scan.sellers
-        ? `Counting… ${scan.scanned}/${Math.min(scan.total, SELLER_SCAN_LIMIT)} listings`
+        ? `Counting… ${scan.scanned}/${Math.min(scan.total, scan.limit)} listings`
         : 'Counting… waiting for the search to settle';
     } else {
       text = scan.status;
@@ -2334,7 +2347,7 @@
 
     const list = panel.querySelector('.tm-seller-list');
     list.textContent = '';
-    if (!sellerSettings.enabled || !scan) {
+    if (!scan) {
       return;
     }
     if (scan.sellers && !sellers.length && scan.done && !scan.error) {
@@ -2495,21 +2508,28 @@
     return JSON.parse(await new Response(stream).text());
   }
 
-  // Earliest time for the next request, per API policy (search and fetch are limited apart).
+  // Earliest time for the next request, per API policy (search and fetch are limited apart),
+  // and the end of a lockout the site has imposed, during which no scan request is sent at all
+  // (another request then would only extend it).
   const tradeApiNextAt = { search: 0, fetch: 0 };
+  const tradeApiLockedUntil = { search: 0, fetch: 0 };
 
   // The scan keeps every rate-limit window under half full: a rule that is still under half
   // allows a request a second, one at half or more drops to half its sustained rate. The rest
   // of the budget stays with the page itself (searching, loading rows, travelling to hideouts).
   async function tradeApiRequest(url, options) {
     const policy = url.startsWith('/api/trade/search/') ? 'search' : 'fetch';
+    const lockedFor = () => Math.ceil((tradeApiLockedUntil[policy] - Date.now()) / 1000);
+    if (lockedFor() > 0) {
+      throw new Error(`rate limited by the trade site, try again in ${lockedFor()}s`);
+    }
     const wait = tradeApiNextAt[policy] - Date.now();
     if (wait > 0) {
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
 
     const response = await fetch(url, options);
-    let interval = 1000;
+    let interval = 1500;
     response.headers.forEach((value, name) => {
       if (!/^x-rate-limit-(?!rules$|policy$)[a-z]+$/i.test(name)) {
         return;
@@ -2518,8 +2538,11 @@
       const states = (response.headers.get(`${name}-state`) || '').split(',');
       value.split(',').forEach((rule, index) => {
         const [hits, period] = rule.split(':').map(Number);
-        const used = Number((states[index] || '').split(':')[0]) || 0;
-        if (hits > 0 && period > 0 && used + 1 >= hits / 2) {
+        const [used, , penalty] = (states[index] || '').split(':').map(Number);
+        if (penalty > 0) {
+          tradeApiLockedUntil[policy] = Math.max(tradeApiLockedUntil[policy], Date.now() + penalty * 1000);
+        }
+        if (hits > 0 && period > 0 && (used || 0) + 1 >= hits / 2) {
           interval = Math.max(interval, (period * 1000 * 2) / hits);
         }
       });
@@ -2527,8 +2550,9 @@
     tradeApiNextAt[policy] = Date.now() + interval;
 
     if (response.status === 429) {
-      const retryAfter = response.headers.get('Retry-After');
-      throw new Error(`rate limited by the trade site${retryAfter ? `, retry in ${retryAfter}s` : ''}`);
+      const retryAfter = Number(response.headers.get('Retry-After')) || 60;
+      tradeApiLockedUntil[policy] = Math.max(tradeApiLockedUntil[policy], Date.now() + retryAfter * 1000);
+      throw new Error(`rate limited by the trade site, try again in ${lockedFor()}s`);
     }
 
     const data = await response.json().catch(() => ({}));
@@ -2540,14 +2564,14 @@
   }
 
   function renderSellerCounts() {
-    const scan = sellerSettings.enabled ? sellerScan : null;
+    const scan = sellerScan;
     const header = document.querySelector('.results .row-total');
     if (header) {
       let status = header.querySelector(`.${SELLER_STATUS_CLASS}`);
       let text = '';
       if (scan) {
         if (!scan.done) {
-          text = `Counting sellers… ${scan.scanned}${scan.sellers ? `/${Math.min(scan.total, SELLER_SCAN_LIMIT)}` : ''}`;
+          text = `Counting sellers… ${scan.scanned}${scan.sellers ? `/${Math.min(scan.total, scan.limit)}` : ''}`;
         } else if (scan.error) {
           text = scan.status;
         } else {
