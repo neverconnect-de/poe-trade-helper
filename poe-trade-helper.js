@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.8
+// @version      0.9.9
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -2331,6 +2331,8 @@
 
   // Presses the site's own "Travel to Hideout" button on the seller's cheapest usable row. The
   // click passes through handleDirectButtonClick, which confirms an "in demand" answer at once.
+  // A button already showing "In demand. Teleport anyway?" carries the "expired" class but stays
+  // enabled, and pressing it is the confirmation; a really expired listing is disabled.
   function travelToSeller(accountName) {
     const candidates = Array.from(document.querySelectorAll('.resultset .row[data-id]'))
       .filter((row) => {
@@ -2338,7 +2340,7 @@
         return !row.classList.contains('gone') && link && link.textContent.trim() === accountName;
       })
       .map((row) => ({ row, button: row.querySelector(DIRECT_BUTTON_SELECTOR), price: readRowPrice(row) }))
-      .filter(({ button }) => button && !button.disabled && !button.classList.contains('disabled') && !button.classList.contains('expired'))
+      .filter(({ button }) => button && !button.disabled && !button.classList.contains('disabled'))
       .sort((a, b) => (a.price ? a.price.amount : Infinity) - (b.price ? b.price.amount : Infinity));
 
     if (!candidates.length) {
