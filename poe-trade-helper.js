@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade Helper
 // @namespace    https://neverconnect.de/
-// @version      0.9.10
+// @version      0.9.11
 // @updateURL    https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @downloadURL  https://raw.githubusercontent.com/neverconnect-de/poe-trade-helper/refs/heads/main/poe-trade-helper.js
 // @description  Build a poe.re-style regex from trade stat filter.
@@ -61,19 +61,6 @@
   let autoConfirmClickInFlight = false;
   const autoConfirmWatchers = new Map();
 
-  // Seller ranking: counted from the result rows the page has loaded (see watchSellerCounts).
-  const SELLER_BADGE_CLASS = 'tm-poe-trade-seller-count';
-  const SELLER_PANEL_ID = 'tm-poe-trade-seller-panel';
-  const SELLER_SETTINGS_KEY = 'tm-poe-trade-seller-settings-v3';
-  const SELLER_AUTO_LOAD_MAX = 100;
-  const SELLER_AUTO_LOAD_PACE_MS = 1200;
-  const SELLER_AUTO_LOAD_TIMEOUT_MS = 8000;
-  const sellerSettings = readSellerSettings();
-  let sellerCount = { sellers: new Map(), rows: 0, matched: null, signature: '' };
-  let sellerRecountQueued = false;
-  // doneKey: the first row element of the search auto-load last ran for (see currentSearchKey).
-  let autoLoadState = { running: false, doneKey: null, message: '' };
-
   function init() {
     injectStyles();
     ensureToast();
@@ -81,7 +68,6 @@
     injectResultButtons();
     observeDom();
     setupInDemandAutoConfirm();
-    watchSellerCounts();
   }
 
   function injectStyles() {
@@ -176,130 +162,6 @@
         letter-spacing: 0.02em;
       }
 
-      .${SELLER_BADGE_CLASS} {
-        display: inline-block;
-        margin-left: 6px;
-        padding: 0 5px;
-        border: 1px solid #8b6c2f;
-        border-radius: 3px;
-        background: #2a1f0b;
-        color: #f8d88c;
-        font-size: 11px;
-        font-weight: 700;
-        line-height: 16px;
-        cursor: help;
-      }
-
-
-      #${SELLER_PANEL_ID} {
-        position: fixed;
-        top: 140px;
-        right: 0;
-        z-index: 9999;
-        display: flex;
-        align-items: flex-start;
-        font: 12px/1.4 Verdana, sans-serif;
-        color: #f0e6d2;
-      }
-
-      #${SELLER_PANEL_ID} .tm-handle {
-        writing-mode: vertical-rl;
-        transform: rotate(180deg);
-        padding: 10px 5px;
-        background: rgba(15, 15, 15, 0.96);
-        border: 1px solid #8b6c2f;
-        border-left: none;
-        color: #f8d88c;
-        font-weight: 700;
-        cursor: pointer;
-        user-select: none;
-      }
-
-      #${SELLER_PANEL_ID} .tm-handle .tm-handle-count {
-        display: inline-block;
-        margin-top: 6px;
-        padding: 3px 0;
-        background: #8b6c2f;
-        color: #0b0b0b;
-        border-radius: 3px;
-      }
-
-      #${SELLER_PANEL_ID} .tm-body {
-        display: none;
-        width: 360px;
-        max-height: 70vh;
-        overflow-y: auto;
-        background: rgba(15, 15, 15, 0.96);
-        border: 1px solid #8b6c2f;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-        padding: 10px 12px;
-      }
-
-      #${SELLER_PANEL_ID}.open .tm-body {
-        display: block;
-      }
-
-      #${SELLER_PANEL_ID} .tm-title {
-        font-size: 13px;
-        font-weight: 700;
-        color: #f8d88c;
-        margin-bottom: 8px;
-      }
-
-      #${SELLER_PANEL_ID} label {
-        display: block;
-        margin-bottom: 6px;
-        color: #d7c9a8;
-        cursor: pointer;
-      }
-
-      #${SELLER_PANEL_ID} input[type="number"] {
-        width: 48px;
-        background: #0b0b0b;
-        color: #f0e6d2;
-        border: 1px solid #59451d;
-      }
-
-      #${SELLER_PANEL_ID} .tm-panel-status {
-        margin: 8px 0;
-        color: #b9ab87;
-      }
-
-      #${SELLER_PANEL_ID} .tm-seller {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 5px 0;
-        border-top: 1px solid #2c2414;
-      }
-
-      #${SELLER_PANEL_ID} .tm-seller-count {
-        min-width: 34px;
-        color: #f8d88c;
-        font-weight: 700;
-        font-size: 14px;
-      }
-
-      #${SELLER_PANEL_ID} .tm-seller-main {
-        flex: 1;
-        min-width: 0;
-      }
-
-      #${SELLER_PANEL_ID} .tm-seller-name {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      #${SELLER_PANEL_ID} .tm-seller-price {
-        color: #b9ab87;
-        font-size: 11px;
-      }
-
-      #${SELLER_PANEL_ID} .tm-seller button {
-        flex: 0 0 auto;
-      }
-
     `;
     document.head.appendChild(style);
   }
@@ -325,36 +187,12 @@
       ensureToast();
       injectGlobalCopyButton();
       injectResultButtons();
-      watchSellerCounts();
     });
 
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true
     });
-  }
-
-  function isButtonUsable(button) {
-    return Boolean(button) && !button.disabled && !button.classList.contains('disabled');
-  }
-
-  // The row's "Travel to Hideout" button, when it can still be pressed. A button already showing
-  // "In demand. Teleport anyway?" carries the "expired" class but stays enabled (pressing it is
-  // the confirmation); a really expired or sold listing has it disabled.
-  function travelButton(row) {
-    const button = row && !row.classList.contains('gone') ? row.querySelector(DIRECT_BUTTON_SELECTOR) : null;
-    return isButtonUsable(button) ? button : null;
-  }
-
-  // Every travel of this script goes here (the Sellers panel, the row's "Rx" button): it presses
-  // the site's own button, so handleDirectButtonClick confirms an "in demand" answer at once.
-  // Returns false when the listing can no longer be travelled from.
-  function travelFromRow(row) {
-    const button = travelButton(row);
-    if (button) {
-      button.click();
-    }
-    return Boolean(button);
   }
 
   // The trade site guards popular listings: clicking "Travel to Hideout" can swap the very
@@ -376,7 +214,7 @@
     }
 
     const button = target.closest(DIRECT_BUTTON_SELECTOR);
-    if (!isButtonUsable(button)) {
+    if (!button || button.disabled || button.classList.contains('disabled')) {
       return;
     }
 
@@ -439,7 +277,7 @@
       }
 
       entry.button = button;
-      if (!isInDemandConfirmButton(button, entry) || !isButtonUsable(button)) {
+      if (!isInDemandConfirmButton(button, entry) || button.disabled || button.classList.contains('disabled')) {
         return;
       }
 
@@ -637,7 +475,7 @@
   }
 
   function injectResultButtons() {
-    const directButtons = Array.from(document.querySelectorAll(`.row ${DIRECT_BUTTON_SELECTOR}`));
+    const directButtons = Array.from(document.querySelectorAll('.row .btns .direct-btn'));
     directButtons.forEach((directButton) => {
       const buttonGroup = directButton.parentElement;
       if (!buttonGroup || buttonGroup.querySelector(`.${RESULT_REGEX_BUTTON_CLASS}`)) {
@@ -652,7 +490,7 @@
       regexButton.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        handleRowRegexCopyAndHideout(directButton.closest('.row'));
+        handleRowRegexCopyAndHideout(directButton);
       });
 
       if (directButton.nextSibling) {
@@ -679,7 +517,8 @@
     showToast('Combined regex copied', result.payload.regex, buildResultMeta(result.payload), true);
   }
 
-  async function handleRowRegexCopyAndHideout(row) {
+  async function handleRowRegexCopyAndHideout(directButton) {
+    const row = directButton && directButton.closest('.row');
     if (!row) {
       showToast('Copy failed', 'Could not find the selected result row.', '', false);
       return;
@@ -702,12 +541,7 @@
       true
     );
 
-    // The page may have re-rendered the row while the regex was built.
-    const rowId = row.getAttribute('data-id');
-    const current = row.isConnected || !rowId ? row : document.querySelector(`.row[data-id="${CSS.escape(rowId)}"]`);
-    if (!travelFromRow(current)) {
-      showToast('Hideout regex copied', combinedRegex, 'Travel not possible: the listing is sold or expired.', true);
-    }
+    directButton.click();
   }
 
   function buildResultMeta(result) {
@@ -2060,347 +1894,6 @@
       .replace(/[#%'-]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-  }
-
-  // Seller ranking, for buying many items in few trades. A side tab opens a panel that lists
-  // the sellers of the listings on the page with the most listings first, with a Travel button
-  // (travelFromRow on the seller's cheapest row). Rows also get a "×N" badge. Everything is read
-  // from the rows the page has loaded: no request of its own; loading more rows (scrolling,
-  // "Load More", auto-load) extends the count.
-  function readSellerSettings() {
-    const defaults = { open: false, minListings: 2, autoLoad: false, autoLoadTarget: SELLER_AUTO_LOAD_MAX };
-    try {
-      return { ...defaults, ...JSON.parse(localStorage.getItem(SELLER_SETTINGS_KEY) || '{}') };
-    } catch (_error) {
-      return defaults;
-    }
-  }
-
-  function saveSellerSettings(changes) {
-    Object.assign(sellerSettings, changes);
-    try {
-      localStorage.setItem(SELLER_SETTINGS_KEY, JSON.stringify(sellerSettings));
-    } catch (error) {
-      showToast('Seller settings not saved', '', error.message, false);
-    }
-  }
-
-  function listingRows() {
-    return Array.from(document.querySelectorAll('.resultset .row[data-id]'));
-  }
-
-  function rowSellerLink(row) {
-    return row.querySelector('.info .profile-link a');
-  }
-
-  function rowSellerName(row) {
-    const link = rowSellerLink(row);
-    return link ? link.textContent.trim() : '';
-  }
-
-  // Called on every DOM mutation: coalesced to one recount per frame.
-  function watchSellerCounts() {
-    if (sellerRecountQueued) {
-      return;
-    }
-    sellerRecountQueued = true;
-    requestAnimationFrame(() => {
-      sellerRecountQueued = false;
-      ensureSellerPanel();
-      const counted = countSellersOnPage();
-      if (counted.signature !== sellerCount.signature) {
-        sellerCount = counted;
-        renderSellerPanel();
-      }
-      renderSellerBadges();
-      maybeAutoLoad();
-    });
-  }
-
-  // Auto-load: presses the page's own "Load More" (10 rows per press, one fetch by the page)
-  // until the target is loaded, once per search. A search re-renders the result list, so its
-  // first row element tells one search from the next, even the same search run again.
-  function clampAutoLoadTarget(value) {
-    return Math.min(SELLER_AUTO_LOAD_MAX, Math.max(10, Math.floor(Number(value)) || SELLER_AUTO_LOAD_MAX));
-  }
-
-  function currentSearchKey() {
-    return document.querySelector('.resultset .row[data-id]');
-  }
-
-  function maybeAutoLoad() {
-    if (!sellerSettings.autoLoad || autoLoadState.running) {
-      return;
-    }
-    const key = currentSearchKey();
-    if (key && key !== autoLoadState.doneKey) {
-      autoLoadSearch(key);
-    }
-  }
-
-  function waitUntil(condition, timeoutMs) {
-    return new Promise((resolve) => {
-      const startedAt = Date.now();
-      const check = () => {
-        if (condition() || Date.now() - startedAt >= timeoutMs) {
-          resolve(condition());
-        } else {
-          setTimeout(check, 100);
-        }
-      };
-      check();
-    });
-  }
-
-  async function autoLoadSearch(key) {
-    autoLoadState = { running: true, doneKey: null, message: '' };
-    renderSellerPanel();
-    const active = () => sellerSettings.autoLoad && currentSearchKey() === key;
-    const loadMoreButton = () => document.querySelector('.resultset .load-more-btn');
-    let message = '';
-
-    while (active()) {
-      const before = listingRows().length;
-      if (before >= clampAutoLoadTarget(sellerSettings.autoLoadTarget)) {
-        break;
-      }
-
-      // The button reads "Loading..." (disabled) while the page fetches, also right after the
-      // first rows of a search have appeared; it is gone once every result is loaded.
-      await waitUntil(() => !active() || !loadMoreButton() || isButtonUsable(loadMoreButton()), SELLER_AUTO_LOAD_TIMEOUT_MS);
-      const button = loadMoreButton();
-      if (!active() || !button) {
-        break;
-      }
-      if (!isButtonUsable(button)) {
-        message = `Auto-load stopped at ${before} listings: "Load More" stayed busy (rate limit?).`;
-        break;
-      }
-
-      button.click();
-      if (!await waitUntil(() => !active() || listingRows().length > before, SELLER_AUTO_LOAD_TIMEOUT_MS)) {
-        message = `Auto-load stopped at ${before} listings: the page loaded no more rows (rate limit?).`;
-        break;
-      }
-
-      // The page's own fetch limit is 6 per 4 s per account; one press per 1.2 s stays well inside.
-      await new Promise((resolve) => setTimeout(resolve, SELLER_AUTO_LOAD_PACE_MS));
-    }
-
-    autoLoadState = { running: false, doneKey: key, message: currentSearchKey() === key ? message : '' };
-    renderSellerPanel();
-  }
-
-  function countSellersOnPage() {
-    const sellers = new Map();
-    const counted = [];
-    listingRows().forEach((row) => {
-      const name = rowSellerName(row);
-      if (row.classList.contains('gone') || !name) {
-        return;
-      }
-
-      counted.push(row.getAttribute('data-id'));
-      let seller = sellers.get(name);
-      if (!seller) {
-        seller = { name, count: 0, prices: new Map() };
-        sellers.set(name, seller);
-      }
-      seller.count += 1;
-
-      const price = readRowPrice(row);
-      if (price) {
-        const entry = seller.prices.get(price.currency) || { count: 0, sum: 0, min: Infinity, max: -Infinity };
-        entry.count += 1;
-        entry.sum += price.amount;
-        entry.min = Math.min(entry.min, price.amount);
-        entry.max = Math.max(entry.max, price.amount);
-        seller.prices.set(price.currency, entry);
-      }
-    });
-
-    const header = document.querySelector('.results .row-total');
-    const matchedMatch = header ? /\(([\d,.]+)\s/.exec(header.textContent) : null;
-    const matched = matchedMatch ? matchedMatch[1] : null;
-    // A listing's seller and price never change, so its id stands for all of it.
-    return { sellers, rows: counted.length, matched, signature: `${matched}|${counted.join(',')}` };
-  }
-
-  // "Asking Price: 130 × Chaos Orb" (the first price block of the row; the fee comes after it).
-  function readRowPrice(row) {
-    const block = row.querySelector('.details .price .currency-text');
-    const text = block && block.closest('.s') ? normalizeWhitespace(block.closest('.s').textContent) : '';
-    const match = /([\d.,]+)\s*×\s*(.+)$/.exec(text);
-    if (!match) {
-      return null;
-    }
-
-    const amount = Number(match[1].replace(/,/g, ''));
-    return Number.isFinite(amount) ? { amount, currency: match[2].trim() } : null;
-  }
-
-  function rankedSellers() {
-    const minListings = Math.max(1, Number(sellerSettings.minListings) || 1);
-    return Array.from(sellerCount.sellers.values())
-      .filter((seller) => seller.count >= minListings)
-      .sort((a, b) => b.count - a.count || sellerSortPrice(a) - sellerSortPrice(b));
-  }
-
-  function sellerSortPrice(seller) {
-    const cheapest = Array.from(seller.prices.values()).map((entry) => entry.min);
-    return cheapest.length ? Math.min(...cheapest) : Infinity;
-  }
-
-  function formatSellerPrices(seller) {
-    return Array.from(seller.prices.entries())
-      .map(([currency, entry]) => {
-        const range = entry.min === entry.max ? `${formatAmount(entry.min)}` : `${formatAmount(entry.min)}–${formatAmount(entry.max)}`;
-        return `${range} ${currency} each · ${formatAmount(entry.sum)} ${currency} for ${entry.count}`;
-      })
-      .join(' | ') || 'no price';
-  }
-
-  function formatAmount(value) {
-    return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-  }
-
-  function ensureSellerPanel() {
-    if (document.getElementById(SELLER_PANEL_ID) || !document.body) {
-      return;
-    }
-
-    const panel = document.createElement('div');
-    panel.id = SELLER_PANEL_ID;
-    panel.innerHTML = `
-      <div class="tm-handle" title="Sellers with the most listings">Sellers <span class="tm-handle-count"></span></div>
-      <div class="tm-body">
-        <div class="tm-title">Sellers with the most listings</div>
-        <label>Show sellers with at least <input type="number" class="tm-min" min="1" step="1"> listings</label>
-        <label><input type="checkbox" class="tm-auto-load"> Auto-load up to <input type="number" class="tm-auto-target" min="10" max="${SELLER_AUTO_LOAD_MAX}" step="10"> listings after a search</label>
-        <div class="tm-panel-status"></div>
-        <div class="tm-seller-list"></div>
-      </div>
-    `;
-    document.body.appendChild(panel);
-
-    // An auto-load setting applies to the current search at once.
-    const onChange = (selector, read, autoLoadSetting) => {
-      panel.querySelector(selector).addEventListener('change', (event) => {
-        saveSellerSettings(read(event.target));
-        if (autoLoadSetting) {
-          autoLoadState.doneKey = null;
-          maybeAutoLoad();
-        }
-        renderSellerPanel();
-        renderSellerBadges();
-      });
-    };
-    onChange('.tm-min', (input) => ({ minListings: Math.max(1, Math.floor(Number(input.value)) || 1) }), false);
-    onChange('.tm-auto-load', (input) => ({ autoLoad: input.checked }), true);
-    onChange('.tm-auto-target', (input) => ({ autoLoadTarget: clampAutoLoadTarget(input.value) }), true);
-    panel.querySelector('.tm-handle').addEventListener('click', () => {
-      saveSellerSettings({ open: !sellerSettings.open });
-      renderSellerPanel();
-    });
-
-    renderSellerPanel();
-  }
-
-  function renderSellerPanel() {
-    const panel = document.getElementById(SELLER_PANEL_ID);
-    if (!panel) {
-      return;
-    }
-
-    const sellers = rankedSellers();
-    panel.classList.toggle('open', Boolean(sellerSettings.open));
-    panel.querySelector('.tm-handle-count').textContent = sellers.length ? String(sellers.length) : '';
-    panel.querySelector('.tm-auto-load').checked = Boolean(sellerSettings.autoLoad);
-    [['.tm-min', sellerSettings.minListings], ['.tm-auto-target', clampAutoLoadTarget(sellerSettings.autoLoadTarget)]].forEach(([selector, value]) => {
-      const input = panel.querySelector(selector);
-      if (document.activeElement !== input) {
-        input.value = String(value);
-      }
-    });
-
-    const { rows, matched } = sellerCount;
-    let text = 'Run a search to count its sellers.';
-    if (rows) {
-      text = `Counted the ${rows} listings loaded on the page${matched ? ` (${matched} matched)` : ''}.`;
-      if (autoLoadState.running) {
-        text += ` Loading more… (target ${clampAutoLoadTarget(sellerSettings.autoLoadTarget)})`;
-      } else if (autoLoadState.message) {
-        text += ` ${autoLoadState.message}`;
-      } else if (!sellerSettings.autoLoad) {
-        text += ' Scroll down or "Load More" to count more.';
-      }
-    }
-    panel.querySelector('.tm-panel-status').textContent = text;
-
-    const list = panel.querySelector('.tm-seller-list');
-    list.textContent = '';
-    if (rows && !sellers.length) {
-      list.textContent = `No seller has ${sellerSettings.minListings} or more of the loaded listings.`;
-      return;
-    }
-
-    sellers.forEach((seller) => {
-      const row = document.createElement('div');
-      row.className = 'tm-seller';
-      row.innerHTML = `
-        <div class="tm-seller-count"></div>
-        <div class="tm-seller-main"><div class="tm-seller-name"></div><div class="tm-seller-price"></div></div>
-        <button type="button" class="btn btn-xs btn-default" title="Teleport to this seller's hideout">Travel</button>
-      `;
-      row.querySelector('.tm-seller-count').textContent = `×${seller.count}`;
-      row.querySelector('.tm-seller-name').textContent = seller.name;
-      row.querySelector('.tm-seller-name').title = seller.name;
-      row.querySelector('.tm-seller-price').textContent = formatSellerPrices(seller);
-      row.querySelector('button').addEventListener('click', () => travelToSeller(seller.name));
-      list.appendChild(row);
-    });
-  }
-
-  // Travel from the seller's cheapest listing on the page that can still be travelled from.
-  function travelToSeller(accountName) {
-    const rows = listingRows()
-      .filter((row) => rowSellerName(row) === accountName && travelButton(row))
-      .sort((a, b) => (readRowPrice(a) || { amount: Infinity }).amount - (readRowPrice(b) || { amount: Infinity }).amount);
-
-    if (!travelFromRow(rows[0])) {
-      showToast('Travel not possible', '', `None of ${accountName}'s listings on the page can be travelled to any more (sold or expired). Search again to refresh them.`, false);
-    }
-  }
-
-  function renderSellerBadges() {
-    const minListings = Math.max(2, Number(sellerSettings.minListings) || 2);
-    listingRows().forEach((row) => {
-      const link = rowSellerLink(row);
-      if (!link) {
-        return;
-      }
-
-      const seller = sellerCount.sellers.get(link.textContent.trim());
-      const count = seller ? seller.count : 0;
-      let badge = link.parentElement.querySelector(`.${SELLER_BADGE_CLASS}`);
-      if (count < minListings) {
-        if (badge) {
-          badge.remove();
-        }
-        return;
-      }
-
-      const text = `×${count}`;
-      if (!badge) {
-        badge = document.createElement('span');
-        badge.className = SELLER_BADGE_CLASS;
-        link.after(badge);
-      }
-      if (badge.textContent !== text) {
-        badge.textContent = text;
-        badge.title = `This seller has ${count} of the ${sellerCount.rows} listings loaded on the page.`;
-      }
-    });
   }
 
   let toastTimer = null;
